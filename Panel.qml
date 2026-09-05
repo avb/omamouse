@@ -38,12 +38,12 @@ Panel {
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
   readonly property color barIconColor: service.status.daemonRunning ? barForeground : Qt.darker(barForeground, 1.55)
   readonly property string statusLine: {
+    if (!service.status.packageInstalled) return "lan-mouse is not installed"
     if (!service.status.tailscale.installed) return "Tailscale is not installed"
     if (!service.status.tailscale.running) return "Tailscale is disconnected"
-    if (service.status.emulateReady === false && service.status.emulateError) return service.status.emulateError
     if (service.status.daemonRunning) return heroPhraseText
     if (service.lastError) return service.lastError
-    return "Deskshare is off"
+    return "Lan Mouse is off"
   }
 
   Service {
@@ -265,7 +265,7 @@ Panel {
               trailingControl: Component {
                 ToggleSwitch {
                   checked: service.status.daemonRunning
-                  enabled: service.status.tailscale.running && !service.busy
+                  enabled: service.status.packageInstalled && service.status.tailscale.running && !service.busy
                   onToggled: service.toggleDaemon()
                 }
               }
@@ -275,13 +275,13 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(4)
-            visible: service.status.emulateReady === false || !service.status.tailscale.running
+            visible: !service.status.packageInstalled || !service.status.tailscale.running
 
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: service.status.emulateReady === false
-                ? "Run setup so this machine can inject a pointer (uinput)."
+              text: !service.status.packageInstalled
+                ? "Install lan-mouse, then turn the switch on."
                 : "Connect Tailscale first. The bar already has a Tailscale icon for that."
               color: root.dim
               font.family: root.fontFamily
@@ -289,9 +289,9 @@ Panel {
             }
 
             PanelActionButton {
-              visible: service.status.emulateReady === false
+              visible: !service.status.packageInstalled
               iconText: "󰏕"
-              tooltipText: service.busy ? "Running setup…" : "Run setup"
+              tooltipText: service.busy ? "Installing…" : "Install lan-mouse"
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: service.installPackages()

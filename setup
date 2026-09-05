@@ -1,28 +1,5 @@
 #!/bin/bash
-# Privileged pieces Deskshare needs on Linux: python-evdev and /dev/uinput
-# for the logged-in seat. Pairing still happens in the bar panel.
+# Install lan-mouse. Pairing happens in the bar panel over Tailscale.
 set -euo pipefail
-omarchy pkg add python-evdev
-
-rule=/etc/udev/rules.d/60-deskshare.rules
-mod=/etc/modules-load.d/deskshare.conf
-if sudo -n true 2>/dev/null; then
-  echo 'KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", TAG+="uaccess", OPTIONS+="static_node=uinput"' | sudo tee "$rule" >/dev/null
-  echo uinput | sudo tee "$mod" >/dev/null
-  sudo modprobe uinput || true
-  sudo udevadm control --reload
-  sudo udevadm trigger --action=add --subsystem-match=misc || true
-  if [[ -e /dev/uinput ]] && ! [[ -w /dev/uinput ]]; then
-    sudo setfacl -m "u:${USER}:rw" /dev/uinput || sudo chmod 666 /dev/uinput
-  fi
-else
-  echo "Need sudo once to allow /dev/uinput for this seat." >&2
-  echo "  sudo tee $rule <<<'KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"'" >&2
-  exit 1
-fi
-
-if [[ -w /dev/uinput ]]; then
-  echo "uinput is writable. Start Deskshare from the bar."
-else
-  echo "uinput still not writable. Log out and back in, then try again." >&2
-fi
+omarchy pkg add lan-mouse wl-clipboard
+echo "Packages installed. Click the icon, turn it on, and pick a Tailscale machine."

@@ -1,3 +1,3 @@
-"""Deskshare: Tailscale keyboard and mouse sharing. Not lan-mouse."""
+"""Dicebag Omarchy plugin that drives lan-mouse over Tailscale."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

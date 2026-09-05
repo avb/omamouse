@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Push the local clipboard to a lan-mouse peer when the pointer enters it.
+
+Usage: clipboard-push <hostname> <ipv4> <os>
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+
+
+def paste() -> bytes:
+    try:
+        proc = subprocess.run(["wl-paste", "-n"], check=False, capture_output=True, timeout=1)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return b""
+    return proc.stdout[: 256 * 1024]
+
+
+def ssh_copy(host: str, os_name: str, data: bytes) -> bool:
+    remote = "pbcopy" if os_name.lower().startswith("mac") or os_name.lower() == "darwin" else "wl-copy"
+    try:
+        proc = subprocess.run(
+            ["tailscale", "ssh", host, remote],
+            check=False,
+            input=data,
+            capture_output=True,
+            timeout=6,
+        )
+        return proc.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        raise SystemExit(0)
+    host = sys.argv[1]
+    os_name = sys.argv[3] if len(sys.argv) > 3 else "linux"
+    data = paste()
+    if not data:
+        raise SystemExit(0)
+    ssh_copy(host, os_name, data)
+
+
+if __name__ == "__main__":
+    main()

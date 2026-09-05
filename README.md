@@ -1,10 +1,8 @@
-# Deskshare for Omarchy
+# Lan Mouse for Omarchy
 
-Share one keyboard and mouse across your Tailscale machines from the Omarchy bar. Push the pointer off the edge of this screen and it appears on the next computer.
+Share one keyboard and mouse across the machines on your Tailscale tailnet, from the Omarchy bar. Push the pointer off the edge of this screen and it appears on the next computer. Keystrokes follow it.
 
-This is our own daemon and protocol. It does not wrap lan-mouse, Synergy, or Deskflow. Both sides run Deskshare. The Linux side is this plugin. A Mac can run the same Python package (`python3 -m deskshare daemon`) from a clone of this repo.
-
-Traffic stays on Tailscale. The daemon binds its TLS listener to your tailnet IPv4 only.
+The engine is [lan-mouse](https://github.com/feschber/lan-mouse). This plugin is ours: Tailscale discovery, pairing in the panel, and clipboard on pointer-enter. It is not a fork of other Omarchy lan-mouse widgets.
 
 ## Install
 
@@ -12,41 +10,60 @@ Traffic stays on Tailscale. The daemon binds its TLS listener to your tailnet IP
 omarchy plugin add https://github.com/dicebagstudios/omarchy-lan-mouse.git --enable
 ```
 
-Click the mouse icon, then setup if `/dev/uinput` is not writable. That installs `python-evdev` and a udev rule so this seat can inject a virtual pointer.
+Click the mouse icon, then install lan-mouse from the panel if it is missing, or:
 
-Tailscale has to be connected.
+```sh
+~/.config/omarchy/plugins/io.github.dicebagstudios.lan-mouse/setup
+```
+
+Turn the switch on. Tailscale has to be connected first.
 
 ## Pair a machine
 
-The panel lists Tailscale peers that can run Deskshare (Linux, macOS, Windows). Click one to put it on the right edge. Click again to walk left / top / bottom. Right click removes it.
+The panel lists Tailscale peers that can run lan-mouse (Linux, macOS, Windows). Click one to put it on the right edge. Click again to walk left / top / bottom. Right click removes it.
 
-On the other computer, start Deskshare, copy its fingerprint, and paste it here under **Allow a peer in**. Authorize this machine's fingerprint over there the same way.
+On the other computer:
 
-Release grab with Control+Shift+Alt+Super.
+1. Install [lan-mouse](https://github.com/feschber/lan-mouse/releases). On a Mac, drop the .app in Applications, clear quarantine with `xattr -rd com.apple.quarantine "Lan Mouse.app"`, and grant Accessibility.
+2. Start it and copy its fingerprint.
+3. Back here, paste that fingerprint under **Allow a peer in** with the Tailscale hostname.
+4. On the other computer, authorize *this* machine's fingerprint the same way.
+
+UDP `4242` has to reach the peer on Tailscale. If a Mac still cannot connect, check Tailscale is up on both sides and that neither end is using an exit node that blocks peer-to-peer.
 
 ## Clipboard
 
-When the pointer crosses, this side sends whatever `wl-paste` returns (capped). The receiver loads it with `wl-copy` or `pbcopy`. Turn the row off if you do not want that.
+When the pointer enters a peer, `scripts/clipboard-push` runs. It sends `wl-paste` over `tailscale ssh` to `pbcopy` on macOS or `wl-copy` on Linux. Turn the clipboard row off if you do not want that.
 
-## Mac
+The reverse direction needs a hook on the other computer. If Tailscale SSH is enabled toward this machine:
 
 ```sh
-git clone https://github.com/dicebagstudios/omarchy-lan-mouse.git
-cd omarchy-lan-mouse
-python3 -m deskshare daemon
+pbpaste | tailscale ssh dirk wl-copy
 ```
 
-Grant Accessibility if macOS asks. Receiving input (Linux controlling the Mac) is what this first cut implements on Darwin. Sending from a Mac (event tap) is next.
+## Keys
+
+| Key | Action |
+|-----|--------|
+| `s` | Start or stop lan-mouse |
+| `c` | Copy this machine's fingerprint |
+| `b` | Toggle clipboard |
+| `x` | Remove the highlighted peer |
+| `r` | Refresh |
+| `i` | Install packages |
+| Esc | Close |
+
+Right click the bar icon to start or stop. Middle click refreshes.
 
 ## Remove
 
 ```sh
-python3 ~/.config/omarchy/plugins/io.github.dicebagstudios.lan-mouse/scripts/ctl stop
+omarchy-shell io.github.dicebagstudios.lan-mouse stop
 omarchy plugin remove io.github.dicebagstudios.lan-mouse
 ```
 
-`~/.config/deskshare/` is left alone so you can reinstall without pairing again.
+`~/.config/lan-mouse/` is left alone so you can reinstall without pairing again.
 
 ## License
 
-MIT.
+MIT. lan-mouse itself is GPL-3.0-or-later. This plugin talks to it as a separate program.

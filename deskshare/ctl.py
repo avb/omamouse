@@ -4,56 +4,181 @@ import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from . import config, linux_emulate, paths, tailscale, tlsutil
+from . import paths, tailscale
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    tomllib = None  # type: ignore
 
 
-def _pid_alive() -> int | None:
+def _run(cmd: list[str], timeout: float = 4.0) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", "not found")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "timeout")
+
+
+def package_version() -> str | None:
+    if not shutil.which("lan-mouse"):
+        return None
+    proc = _run(["lan-mouse", "--version"])
+    text = (proc.stdout or proc.stderr).strip()
+    if proc.returncode != 0:
+        return "unknown"
+    return text.split()[-1] if text else "unknown"
+
+
+def fingerprint() -> str:
+    if not paths.CERT_PATH.exists():
+        return ""
+    proc = _run(["openssl", "x509", "-in", str(paths.CERT_PATH), "-noout", "-fingerprint", "-sha256"])
+    if proc.returncode != 0 or "=" not in proc.stdout:
+        return ""
+    return proc.stdout.strip().split("=", 1)[1].strip().lower()
+
+
+def pid_alive() -> int | None:
     try:
         pid = int(paths.PID_PATH.read_text().strip())
         os.kill(pid, 0)
     except (OSError, ValueError):
         return None
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    try:
+        args = cmdline.read_bytes().replace(b"\x00", b" ").decode()
+    except OSError:
+        args = ""
+    if "lan-mouse" not in args:
+        return None
     return pid
 
 
-def _talk(req: dict) -> dict | None:
-    if _pid_alive() is None:
-        return None
+def desired_on() -> bool:
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(4)
-        sock.connect(str(paths.SOCK_PATH))
-        sock.sendall((json.dumps(req) + "\n").encode())
-        data = b""
-        while b"\n" not in data:
-            piece = sock.recv(65536)
-            if not piece:
-                break
-            data += piece
-        sock.close()
-        return json.loads(data.decode())
-    except Exception:
-        return None
+        return paths.DESIRED_PATH.read_text().strip() == "on"
+    except OSError:
+        return False
+
+
+def set_desired(value: str) -> None:
+    paths.ensure()
+    paths.DESIRED_PATH.write_text(value + "\n")
+    paths.DESIRED_PATH.chmod(0o600)
+
+
+def clipboard_on() -> bool:
+    try:
+        return paths.CLIPBOARD_FLAG.read_text().strip() != "off"
+    except OSError:
+        return True
+
+
+def set_clipboard_flag(enabled: bool) -> None:
+    paths.ensure()
+    paths.CLIPBOARD_FLAG.write_text(("on" if enabled else "off") + "\n")
+    paths.CLIPBOARD_FLAG.chmod(0o600)
+
+
+def load_config() -> dict:
+    cfg = {
+        "port": paths.PORT_DEFAULT,
+        "release_bind": list(paths.RELEASE_BIND),
+        "authorized_fingerprints": {},
+        "clients": [],
+    }
+    if not paths.CONFIG_PATH.exists() or tomllib is None:
+        return cfg
+    try:
+        raw = tomllib.loads(paths.CONFIG_PATH.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return cfg
+    cfg["port"] = int(raw.get("port") or paths.PORT_DEFAULT)
+    if isinstance(raw.get("release_bind"), list) and raw["release_bind"]:
+        cfg["release_bind"] = [str(x) for x in raw["release_bind"]]
+    fps = raw.get("authorized_fingerprints") or {}
+    if isinstance(fps, dict):
+        cfg["authorized_fingerprints"] = {str(k).lower(): str(v) for k, v in fps.items()}
+    clients = []
+    for item in raw.get("clients") or []:
+        if not isinstance(item, dict):
+            continue
+        clients.append(
+            {
+                "hostname": str(item.get("hostname") or ""),
+                "position": str(item.get("position") or "right"),
+                "port": int(item.get("port") or cfg["port"]),
+                "ips": [str(ip) for ip in (item.get("ips") or [])],
+                "activate_on_startup": True,
+                "enter_hook": str(item.get("enter_hook") or ""),
+            }
+        )
+    cfg["clients"] = clients
+    return cfg
+
+
+def _esc(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def clipboard_hook(name: str, ip: str, os_name: str) -> str:
+    return f"{paths.PUSH_SCRIPT} {name} {ip} {os_name.replace(' ', '')}"
+
+
+def write_config(cfg: dict) -> None:
+    paths.ensure()
+    lines = [
+        f"port = {int(cfg.get('port') or paths.PORT_DEFAULT)}",
+        "release_bind = [" + ", ".join(f'"{_esc(k)}"' for k in (cfg.get("release_bind") or paths.RELEASE_BIND)) + "]",
+        "",
+        "[authorized_fingerprints]",
+    ]
+    fps = cfg.get("authorized_fingerprints") or {}
+    if not fps:
+        lines.append("# paste a peer fingerprint so it can control this machine")
+    for fp, name in fps.items():
+        lines.append(f'"{_esc(fp)}" = "{_esc(name)}"')
+    lines.append("")
+    for client in cfg.get("clients") or []:
+        lines.append("[[clients]]")
+        lines.append(f'position = "{_esc(client.get("position") or "right")}"')
+        host = client.get("hostname") or ""
+        if host:
+            lines.append(f'hostname = "{_esc(host)}"')
+        ips = client.get("ips") or []
+        if ips:
+            lines.append("ips = [" + ", ".join(f'"{_esc(ip)}"' for ip in ips) + "]")
+        lines.append(f"port = {int(client.get('port') or cfg.get('port') or paths.PORT_DEFAULT)}")
+        lines.append("activate_on_startup = true")
+        hook = client.get("enter_hook") or ""
+        if hook:
+            lines.append(f'enter_hook = "{_esc(hook)}"')
+        lines.append("")
+    paths.CONFIG_PATH.write_text("\n".join(lines).rstrip() + "\n")
+    paths.CONFIG_PATH.chmod(0o600)
+
+
+def restart_if_running() -> None:
+    if pid_alive():
+        stop_daemon(forget_desired=False)
+        time.sleep(0.2)
+        start_daemon()
 
 
 def build_status() -> dict:
     ts = tailscale.status()
-    cfg = config.load()
-    emu_ok, emu_err = (False, "not linux")
-    if sys.platform.startswith("linux"):
-        emu_ok, emu_err = linux_emulate.ready()
-    fp = ""
-    try:
-        fp = tlsutil.fingerprint()
-    except Exception:
-        pass
-    configured = {p["name"]: p for p in cfg.get("peers") or []}
-    authorized_by_name = {name: f for f, name in (cfg.get("authorized") or {}).items()}
+    cfg = load_config()
+    version = package_version()
+    daemon_pid = pid_alive()
+    authorized_by_name = {name: fp for fp, name in cfg["authorized_fingerprints"].items()}
+    configured = {c["hostname"]: c for c in cfg["clients"] if c.get("hostname")}
     machines = []
     for peer in ts["peers"]:
         name = peer["name"]
@@ -76,16 +201,16 @@ def build_status() -> dict:
     return {
         "ok": True,
         "pluginRoot": str(paths.PLUGIN_ROOT),
-        "packageInstalled": emu_ok or not sys.platform.startswith("linux"),
-        "packageVersion": "deskshare",
-        "emulateReady": emu_ok,
-        "emulateError": emu_err,
-        "daemonRunning": _pid_alive() is not None,
-        "daemonPid": _pid_alive() or 0,
-        "desiredOn": config.desired_on(),
-        "clipboardEnabled": bool(cfg.get("clipboard", True)),
-        "fingerprint": fp,
-        "port": int(cfg.get("port") or paths.PORT_DEFAULT),
+        "packageInstalled": version is not None,
+        "packageVersion": version or "",
+        "emulateReady": version is not None,
+        "emulateError": "" if version else "lan-mouse is not installed",
+        "daemonRunning": daemon_pid is not None,
+        "daemonPid": daemon_pid or 0,
+        "desiredOn": desired_on(),
+        "clipboardEnabled": clipboard_on(),
+        "fingerprint": fingerprint(),
+        "port": int(cfg["port"]),
         "tailscale": {
             "installed": ts["installed"],
             "running": ts["running"],
@@ -94,126 +219,147 @@ def build_status() -> dict:
             "selfIp": ts["selfIp"],
         },
         "machines": machines,
-        "authorized": [{"fingerprint": f, "name": n} for f, n in (cfg.get("authorized") or {}).items()],
-        "seen": [{"fingerprint": f, "name": n} for f, n in (cfg.get("seen") or {}).items()],
+        "authorized": [{"fingerprint": fp, "name": name} for fp, name in cfg["authorized_fingerprints"].items()],
     }
-
-
-def handle(verb: str, args: dict, daemon=None) -> dict:
-    if verb == "status":
-        return build_status()
-    if verb == "add-peer":
-        name = str(args.get("name") or "")
-        position = str(args.get("position") or "right")
-        if position not in ("left", "right", "top", "bottom"):
-            return {"ok": False, "error": "position must be left, right, top or bottom"}
-        peer = tailscale.find_peer(name)
-        if peer is None:
-            return {"ok": False, "error": f"no Tailscale machine named {name}"}
-        if not peer["shareable"]:
-            return {"ok": False, "error": f"{name} cannot run Deskshare"}
-        if not peer["ips"]:
-            return {"ok": False, "error": f"{name} has no Tailscale IPv4"}
-        cfg = config.load()
-        cfg["peers"] = [p for p in cfg["peers"] if p["name"] != name]
-        cfg["peers"].append({"name": name, "ips": peer["ips"], "position": position, "port": cfg["port"]})
-        config.save(cfg)
-        if daemon:
-            daemon.reload()
-        return build_status()
-    if verb == "remove-peer":
-        name = str(args.get("name") or "")
-        cfg = config.load()
-        cfg["peers"] = [p for p in cfg["peers"] if p["name"] != name]
-        config.save(cfg)
-        if daemon:
-            daemon.reload()
-        return build_status()
-    if verb == "authorize":
-        name = str(args.get("name") or "peer").strip()
-        fp = str(args.get("fingerprint") or "").strip().lower()
-        if ":" not in fp:
-            return {"ok": False, "error": "that does not look like a fingerprint"}
-        cfg = config.load()
-        cfg.setdefault("authorized", {})[fp] = name
-        config.save(cfg)
-        if daemon:
-            daemon.reload()
-        return build_status()
-    if verb == "deauthorize":
-        fp = str(args.get("fingerprint") or "").strip().lower()
-        cfg = config.load()
-        cfg.get("authorized", {}).pop(fp, None)
-        config.save(cfg)
-        if daemon:
-            daemon.reload()
-        return build_status()
-    if verb == "clipboard":
-        enabled = str(args.get("enabled") or "") == "on"
-        cfg = config.load()
-        cfg["clipboard"] = enabled
-        config.save(cfg)
-        if daemon:
-            daemon.cfg = cfg
-        return build_status()
-    if verb == "copy-fingerprint":
-        fp = tlsutil.fingerprint()
-        if shutil.which("wl-copy"):
-            subprocess.run(["wl-copy"], input=(fp + "\n").encode(), check=False, timeout=2)
-        return {"ok": True, "fingerprint": fp, "copied": True}
-    return {"ok": False, "error": f"unknown verb {verb}"}
 
 
 def start_daemon() -> dict:
     paths.ensure()
+    if package_version() is None:
+        return {"ok": False, "error": "lan-mouse is not installed"}
     ts = tailscale.status()
     if not ts["running"]:
         return {"ok": False, "error": "Tailscale is not connected"}
-    if _pid_alive():
-        config.set_desired("on")
+    write_config(load_config())
+    if pid_alive():
+        set_desired("on")
         return build_status()
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(paths.PLUGIN_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     log = paths.LOG_PATH.open("ab")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "deskshare", "daemon"],
-        cwd=str(paths.PLUGIN_ROOT),
-        env=env,
+        ["lan-mouse", "daemon"],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
+        cwd=str(Path.home()),
     )
     paths.PID_PATH.write_text(str(proc.pid) + "\n")
-    config.set_desired("on")
+    set_desired("on")
+    for _ in range(25):
+        if fingerprint():
+            break
+        time.sleep(0.1)
     return build_status()
 
 
-def stop_daemon() -> dict:
-    config.set_desired("off")
-    pid = _pid_alive()
+def stop_daemon(*, forget_desired: bool = True) -> dict:
+    if forget_desired:
+        set_desired("off")
+    pid = pid_alive()
     if pid:
         os.kill(pid, signal.SIGTERM)
+        for _ in range(20):
+            if not Path(f"/proc/{pid}").exists():
+                break
+            time.sleep(0.05)
+        if Path(f"/proc/{pid}").exists():
+            os.kill(pid, signal.SIGKILL)
     try:
         paths.PID_PATH.unlink()
     except OSError:
         pass
-    try:
-        paths.SOCK_PATH.unlink()
-    except OSError:
-        pass
     return build_status()
 
 
+def add_peer(name: str, position: str) -> dict:
+    if position not in ("left", "right", "top", "bottom"):
+        return {"ok": False, "error": "position must be left, right, top or bottom"}
+    peer = tailscale.find_peer(name)
+    if peer is None:
+        return {"ok": False, "error": f"no Tailscale machine named {name}"}
+    if not peer["shareable"]:
+        return {"ok": False, "error": f"{name} is {peer['os']}, which cannot run lan-mouse"}
+    if not peer["ips"]:
+        return {"ok": False, "error": f"{name} has no Tailscale IPv4 address"}
+    cfg = load_config()
+    others = [c for c in cfg["clients"] if c.get("hostname") != name]
+    hook = clipboard_hook(name, peer["ips"][0], peer["os"]) if clipboard_on() else ""
+    others.append(
+        {
+            "hostname": name,
+            "position": position,
+            "port": cfg["port"],
+            "ips": peer["ips"],
+            "activate_on_startup": True,
+            "enter_hook": hook,
+        }
+    )
+    cfg["clients"] = others
+    write_config(cfg)
+    restart_if_running()
+    return build_status()
+
+
+def remove_peer(name: str) -> dict:
+    cfg = load_config()
+    cfg["clients"] = [c for c in cfg["clients"] if c.get("hostname") != name]
+    write_config(cfg)
+    restart_if_running()
+    return build_status()
+
+
+def authorize(name: str, fingerprint_value: str) -> dict:
+    fp = fingerprint_value.strip().lower()
+    if ":" not in fp or len(fp) < 32:
+        return {"ok": False, "error": "that does not look like a lan-mouse fingerprint"}
+    cfg = load_config()
+    cfg["authorized_fingerprints"][fp] = name.strip() or "peer"
+    write_config(cfg)
+    restart_if_running()
+    return build_status()
+
+
+def deauthorize(fingerprint_value: str) -> dict:
+    fp = fingerprint_value.strip().lower()
+    cfg = load_config()
+    cfg["authorized_fingerprints"].pop(fp, None)
+    write_config(cfg)
+    restart_if_running()
+    return build_status()
+
+
+def set_clipboard(enabled: bool) -> dict:
+    set_clipboard_flag(enabled)
+    cfg = load_config()
+    peers = {p["name"]: p for p in tailscale.status()["peers"]}
+    for client in cfg["clients"]:
+        name = client.get("hostname") or ""
+        peer = peers.get(name)
+        ip = (peer["ips"][0] if peer and peer["ips"] else (client.get("ips") or [""])[0])
+        os_name = peer["os"] if peer else "linux"
+        client["enter_hook"] = clipboard_hook(name, ip, os_name) if enabled else ""
+    write_config(cfg)
+    restart_if_running()
+    return build_status()
+
+
+def copy_fingerprint() -> dict:
+    fp = fingerprint()
+    if not fp:
+        return {"ok": False, "error": "no fingerprint yet; start the daemon once"}
+    if shutil.which("wl-copy"):
+        subprocess.run(["wl-copy"], input=(fp + "\n").encode(), check=False, timeout=2)
+    return {"ok": True, "fingerprint": fp, "copied": True}
+
+
 def install_packages() -> dict:
-    setup = paths.PLUGIN_ROOT / "setup"
-    proc = subprocess.run([str(setup)], check=False, capture_output=True, text=True, timeout=180)
+    proc = _run(["omarchy", "pkg", "add", "lan-mouse", "wl-clipboard"], timeout=180)
     if proc.returncode != 0:
-        return {"ok": False, "error": (proc.stderr or proc.stdout or "setup failed").strip()[:400]}
+        return {"ok": False, "error": (proc.stderr or proc.stdout or "install failed").strip()[:400]}
     return build_status()
 
 
 def restore() -> dict:
-    if config.desired_on():
+    if desired_on() and package_version() is not None:
         return start_daemon()
     return build_status()
 
@@ -229,8 +375,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--enabled", default="")
     args = parser.parse_args(argv)
     verb = args.verb
-    payload: dict
-    if verb == "start":
+    if verb == "status":
+        payload = build_status()
+    elif verb == "start":
         payload = start_daemon()
     elif verb == "stop":
         payload = stop_daemon()
@@ -238,18 +385,25 @@ def main(argv: list[str] | None = None) -> None:
         payload = install_packages()
     elif verb == "restore":
         payload = restore()
-    elif verb in ("status", "add-peer", "remove-peer", "authorize", "deauthorize", "clipboard", "copy-fingerprint"):
-        req = {
-            "verb": verb,
-            "name": args.name,
-            "position": args.position,
-            "fingerprint": args.fingerprint,
-            "enabled": args.enabled,
-        }
-        live = _talk(req) if verb != "status" else None
-        payload = live if live is not None else handle(verb, req)
-        if verb == "status":
-            payload = build_status()
+    elif verb == "add-peer":
+        payload = add_peer(args.name, args.position)
+    elif verb == "remove-peer":
+        payload = remove_peer(args.name)
+    elif verb == "authorize":
+        payload = authorize(args.name, args.fingerprint)
+    elif verb == "deauthorize":
+        payload = deauthorize(args.fingerprint)
+    elif verb == "clipboard":
+        if args.enabled not in ("on", "off"):
+            payload = {"ok": False, "error": "clipboard --enabled on|off"}
+        else:
+            payload = set_clipboard(args.enabled == "on")
+    elif verb == "copy-fingerprint":
+        payload = copy_fingerprint()
     else:
         payload = {"ok": False, "error": f"unknown verb {verb}"}
     print(json.dumps(payload, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main()
