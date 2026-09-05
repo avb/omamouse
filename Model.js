@@ -5,6 +5,8 @@ function emptyStatus() {
     ok: false,
     packageInstalled: false,
     packageVersion: "",
+    emulateReady: false,
+    emulateError: "",
     daemonRunning: false,
     daemonPid: 0,
     clipboardRecvRunning: false,

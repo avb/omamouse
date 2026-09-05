@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "io.github.dicebagstudios.lan-mouse",
-  "name": "Lan Mouse",
+  "name": "Deskshare",
   "version": "1.0.0",
   "author": "Dicebag Studios",
   "license": "MIT",
-  "description": "Share one keyboard and mouse across Tailscale machines from the Omarchy bar. Pair peers in the panel, including macOS.",
+  "description": "Share one keyboard and mouse across Tailscale machines from the Omarchy bar. Our own daemon and protocol, not lan-mouse.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Lan Mouse",
+    "displayName": "Deskshare",
     "description": "Slide the pointer off the edge of this screen onto another Tailscale machine.",
     "category": "Desktop",
     "allowMultiple": false,
@@ -35,7 +35,7 @@
       {
         "key": "restoreDaemon",
         "type": "boolean",
-        "label": "Start lan-mouse at login if it was left on",
+        "label": "Start Deskshare at login if it was left on",
         "defaultValue": true
       }
     ]
