@@ -1,0 +1,5 @@
+#!/bin/bash
+# Install lan-mouse and wl-clipboard. Pairing happens in the bar panel.
+set -euo pipefail
+omarchy pkg add lan-mouse wl-clipboard
+echo "Packages installed. Click the Lan Mouse icon, turn it on, and pick a Tailscale machine."
