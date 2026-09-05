@@ -36,6 +36,9 @@ Panel {
   readonly property var machines: Model.shareableMachines(service.status.machines || [])
   readonly property var authorized: service.status.authorized || []
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
   readonly property color barIconColor: service.status.daemonRunning ? barForeground : Qt.darker(barForeground, 1.55)
   readonly property string statusLine: {
     if (!service.status.packageInstalled) return "lan-mouse is not installed"
