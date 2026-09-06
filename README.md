@@ -18,11 +18,23 @@ Click the mouse icon, then install lan-mouse from the panel if it is missing, or
 
 Turn the switch on. Tailscale has to be connected first.
 
+On this computer, the panel's **Install lan-mouse on this computer** link runs `omarchy pkg add lan-mouse`.
+
 ## Pair a machine
 
-The panel lists Tailscale peers that can run lan-mouse (Linux, macOS, Windows). Click one to put it on the right edge. Click again to walk left / top / bottom. Right click removes it.
+The panel lists Tailscale peers that can run lan-mouse (Linux, macOS, Windows). Click a name to select it, then:
 
-On the other computer:
+- **Install** tries to put lan-mouse on that machine
+- **Copy steps** puts the hand-install instructions on the clipboard
+- **Use on the right** (or Edge) adds it to the pointer layout
+
+**macOS.** If Tailscale SSH answers, we look for Homebrew and run `brew install lan-mouse`. There is often no formula, so we then download the official `.app` zip over SSH into `/Applications`. If SSH is off, or Homebrew is missing and the zip fails, the panel shows the manual steps. Enable SSH from the Tailscale menu on the Mac if you want the panel to do it next time.
+
+**Windows.** Always manual. Copy steps and run the zip.
+
+**Linux.** Over SSH we try `pacman` when it is there. Otherwise copy steps.
+
+On the other computer, if you installed by hand:
 
 1. Install [lan-mouse](https://github.com/feschber/lan-mouse/releases). On a Mac, drop the .app in Applications, clear quarantine with `xattr -rd com.apple.quarantine "Lan Mouse.app"`, and grant Accessibility.
 2. Start it and copy its fingerprint.
@@ -50,7 +62,9 @@ pbpaste | tailscale ssh dirk wl-copy
 | `b` | Toggle clipboard |
 | `x` | Remove the highlighted peer |
 | `r` | Refresh |
-| `i` | Install packages |
+| `i` | Install lan-mouse on the selected peer, or on this computer |
+| `n` | Install on the selected peer |
+| `a` | Add or cycle the selected peer's screen edge |
 | Esc | Close |
 
 Right click the bar icon to start or stop. Middle click refreshes.

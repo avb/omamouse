@@ -198,6 +198,13 @@ def build_status() -> dict:
                 "fingerprint": authorized_by_name.get(name, ""),
             }
         )
+    last = {}
+    try:
+        from .remote import load_last
+
+        last = load_last()
+    except Exception:
+        last = {}
     return {
         "ok": True,
         "pluginRoot": str(paths.PLUGIN_ROOT),
@@ -220,6 +227,7 @@ def build_status() -> dict:
         },
         "machines": machines,
         "authorized": [{"fingerprint": fp, "name": name} for fp, name in cfg["authorized_fingerprints"].items()],
+        "lastInstall": last,
     }
 
 
@@ -358,6 +366,32 @@ def install_packages() -> dict:
     return build_status()
 
 
+def install_peer(name: str) -> dict:
+    from .remote import install_peer as do_install
+
+    result = do_install(name)
+    payload = build_status()
+    payload["lastInstall"] = result
+    if result.get("error"):
+        payload["ok"] = False
+        payload["error"] = result["error"]
+    elif not result.get("installed") and result.get("method") == "manual":
+        payload["ok"] = True
+    return payload
+
+
+def copy_instructions(name: str) -> dict:
+    from .remote import copy_instructions as do_copy
+
+    result = do_copy(name)
+    payload = build_status()
+    payload.update({k: result[k] for k in result if k != "ok"})
+    if not result.get("ok"):
+        payload["ok"] = False
+        payload["error"] = result.get("error") or "copy failed"
+    return payload
+
+
 def restore() -> dict:
     if desired_on() and package_version() is not None:
         return start_daemon()
@@ -383,6 +417,10 @@ def main(argv: list[str] | None = None) -> None:
         payload = stop_daemon()
     elif verb == "install":
         payload = install_packages()
+    elif verb == "install-peer":
+        payload = install_peer(args.name)
+    elif verb == "copy-instructions":
+        payload = copy_instructions(args.name)
     elif verb == "restore":
         payload = restore()
     elif verb == "add-peer":

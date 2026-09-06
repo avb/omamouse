@@ -219,7 +219,16 @@ Panel {
         if (t === "s" || t === "S") service.toggleDaemon()
         else if (t === "c" || t === "C") service.copyFingerprint()
         else if (t === "b" || t === "B") service.setClipboard(!service.status.clipboardEnabled)
-        else if (t === "i" || t === "I") service.installPackages()
+        else if (t === "i" || t === "I") {
+          var sel = root.selectedMachine()
+          if (sel) service.installPeer(sel.name)
+          else service.installPackages()
+        }
+        else if (t === "n" || t === "N") {
+          var peer = root.selectedMachine()
+          if (peer) service.installPeer(peer.name)
+        }
+        else if (t === "a" || t === "A") root.cycleOrAdd(root.selectedMachine())
         else if (t === "r" || t === "R") service.refresh()
         else if (t === "x" || t === "X") {
           var m = root.selectedMachine()
@@ -334,12 +343,29 @@ Panel {
               visible: service.status.tailscale.selfIp !== ""
             }
 
-            PanelActionButton {
-              iconText: "󰆏"
-              tooltipText: "Copy fingerprint"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: service.copyFingerprint()
+            Row {
+              spacing: Style.space(12)
+              PanelActionButton {
+                iconText: "󰆏"
+                tooltipText: "Copy fingerprint"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: service.copyFingerprint()
+              }
+              Text {
+                visible: !service.status.packageInstalled
+                anchors.verticalCenter: parent.verticalCenter
+                text: service.busy ? "Installing on this computer…" : "Install lan-mouse on this computer"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.underline: true
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: service.installPackages()
+                }
+              }
             }
           }
 
@@ -395,7 +421,7 @@ Panel {
                       if (modelData.configured) bits.push("edge " + modelData.position)
                       if (modelData.authorized) bits.push("can control this machine")
                       else if (modelData.configured) bits.push("waiting for their fingerprint")
-                      else bits.push("click to add on the right")
+                      else bits.push("click to select")
                       return bits.join(" · ")
                     }
                     color: root.dim
@@ -403,11 +429,88 @@ Panel {
                     font.pixelSize: Style.font.caption
                     wrapMode: Text.WordWrap
                   }
+
+                  Column {
+                    width: parent.width
+                    spacing: Style.space(4)
+                    visible: root.focusSection === "machines" && root.machineIndex === index
+                    topPadding: Style.space(4)
+
+                    Text {
+                      width: parent.width
+                      text: service.busy
+                        ? "Working on " + modelData.name + "…"
+                        : (Model.osLabel(modelData.os) === "macOS"
+                          ? "Install over Tailscale SSH (Homebrew if present, else the official Mac app)."
+                          : (Model.osLabel(modelData.os) === "Windows"
+                            ? "Windows is installed by hand. Copy the steps below."
+                            : "Install over Tailscale SSH when this is Arch, else copy the steps."))
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                    }
+
+                    Row {
+                      spacing: Style.space(14)
+                      Text {
+                        text: "Install"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.underline: true
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: service.installPeer(modelData.name)
+                        }
+                      }
+                      Text {
+                        text: "Copy steps"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.underline: true
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: service.copyInstructions(modelData.name)
+                        }
+                      }
+                      Text {
+                        text: modelData.configured ? ("Edge: " + modelData.position) : "Use on the right"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.underline: true
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.cycleOrAdd(modelData)
+                        }
+                      }
+                    }
+
+                    Text {
+                      width: parent.width
+                      visible: (service.status.lastInstall && service.status.lastInstall.name === modelData.name)
+                      text: {
+                        var last = service.status.lastInstall || {}
+                        if (last.installed) return "Installed on " + modelData.name + " via " + (last.method || "ssh") + "."
+                        return last.instructions || ""
+                      }
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                    }
+                  }
                 }
 
                 MouseArea {
                   id: machineMouse
                   anchors.fill: parent
+                  z: -1
                   hoverEnabled: true
                   acceptedButtons: Qt.LeftButton | Qt.RightButton
                   onClicked: function(ev) {
@@ -416,8 +519,6 @@ Panel {
                     root.cursorActive = true
                     if (ev.button === Qt.RightButton && modelData.configured)
                       service.removePeer(modelData.name)
-                    else
-                      root.cycleOrAdd(modelData)
                   }
                 }
               }

@@ -17,6 +17,7 @@ function emptyStatus() {
     tailscale: { installed: false, running: false, selfName: "", selfDns: "", selfIp: "" },
     machines: [],
     authorized: [],
+    lastInstall: {},
     error: ""
   }
 }

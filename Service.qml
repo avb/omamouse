@@ -64,6 +64,8 @@ Item {
   function deauthorize(fingerprint) { runVerb(["deauthorize", "--fingerprint", fingerprint]) }
   function setClipboard(on) { runVerb(["clipboard", "--enabled", on ? "on" : "off"]) }
   function copyFingerprint() { runVerb(["copy-fingerprint"]) }
+  function installPeer(name) { runVerb(["install-peer", "--name", name]) }
+  function copyInstructions(name) { runVerb(["copy-instructions", "--name", name]) }
   function restore() {
     if (!restoreDaemon || restoring) return
     restoring = true

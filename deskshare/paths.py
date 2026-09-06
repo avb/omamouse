@@ -14,6 +14,7 @@ PID_PATH = RUNTIME_DIR / "lan-mouse.pid"
 LOG_PATH = RUNTIME_DIR / "lan-mouse.log"
 DESIRED_PATH = STATE_DIR / "desired"
 CLIPBOARD_FLAG = STATE_DIR / "clipboard"
+LAST_INSTALL_PATH = STATE_DIR / "last-install.json"
 PUSH_SCRIPT = PLUGIN_ROOT / "scripts" / "clipboard-push"
 RELEASE_BIND = ["KeyLeftCtrl", "KeyLeftShift", "KeyLeftMeta", "KeyLeftAlt"]
 
