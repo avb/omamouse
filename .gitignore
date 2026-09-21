@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 .qmlcache/
 *.bak
+
+# Local model reference notes
+/.agent-notes/
+/REVIEW.md

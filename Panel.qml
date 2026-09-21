@@ -45,13 +45,13 @@ Panel {
 
   readonly property color barIconColor: service.status.daemonRunning ? barForeground : Qt.darker(barForeground, 1.55)
   readonly property string statusLine: {
+    if (service.lastError) return service.lastError
     if (!service.status.packageInstalled) return "lan-mouse is not installed"
     if (!service.status.tailscale.installed) return "Tailscale is not installed"
     if (!service.status.tailscale.running) return "Tailscale is disconnected"
     if (service.status.emulationDummy) return "emulation is dummy; incoming pointer will not move"
     if (service.status.captureStuck) return "pointer captured but the peer did not connect"
     if (service.status.daemonRunning) return heroPhraseText
-    if (service.lastError) return service.lastError
     return "OmaMouse is off"
   }
 
@@ -184,7 +184,7 @@ Panel {
 
   function sshFailedFor(name) {
     var last = lastFor(name)
-    return last.ssh === false && !last.installed
+    return last.needAuth === true || last.ssh === false && !last.installed
   }
 
   function installedFor(name) {
@@ -236,7 +236,8 @@ Panel {
     root.controller.hide()
   }
 
-  onMachineIndexChanged: loadSshForm()
+  readonly property string selectedMachineName: selectedMachine() ? selectedMachine().name : ""
+  onSelectedMachineNameChanged: loadSshForm()
   function toggle() {
     if (root.opened) root.close()
     else root.open()
@@ -316,15 +317,18 @@ Panel {
         }
         else if (t === "t" || t === "T") {
           var retryPeer = root.selectedMachine()
-          if (retryPeer && (root.sshFailedFor(retryPeer.name) || (root.installedFor(retryPeer.name) && !retryPeer.authorized)))
+          if (retryPeer && Model.osLabel(retryPeer.os) !== "Windows")
             root.retrySelectedSsh()
         }
         else if (t === "a" || t === "A") root.cycleOrAdd(root.selectedMachine())
         else if (t === "u" || t === "U") service.releasePointer()
         else if (t === "r" || t === "R") service.refresh()
         else if (t === "x" || t === "X") {
-          var m = root.selectedMachine()
-          if (m && m.configured) service.removePeer(m.name)
+          if (root.focusSection === "auth") root.forgetAuth(root.selectedAuth())
+          else {
+            var m = root.selectedMachine()
+            if (m && m.configured) service.removePeer(m.name)
+          }
         }
       }
 
@@ -369,7 +373,7 @@ Panel {
               trailingControl: Component {
                 ToggleSwitch {
                   checked: service.status.daemonRunning
-                  enabled: service.status.packageInstalled && service.status.tailscale.running && !service.busy
+                  enabled: (service.status.daemonRunning || (service.status.packageInstalled && service.status.tailscale.running)) && !service.busy
                   onToggled: service.toggleDaemon()
                 }
               }
@@ -524,7 +528,7 @@ Panel {
                 readonly property var occupant: root.machineOnEdge(edge)
                 readonly property bool lit: {
                   var sel = root.selectedMachine()
-                  return (sel && occupant && sel.name === occupant.name) || (hovered && occupant)
+                  return (sel && occupant && sel.name === occupant.name) || (slotMouse.containsMouse && occupant)
                 }
                 width: Style.space(112)
                 height: Style.space(58)
@@ -744,7 +748,7 @@ Panel {
                       placeholderText: "SSH user, default " + (service.status.osUser || "this computer's user")
                       foreground: root.foreground
                       font.family: root.fontFamily
-                      onTextChanged: {
+                      onTextEdited: {
                         if (root.sshUserText !== text) root.sshUserText = text
                         root.rememberSshUser()
                       }
@@ -760,12 +764,13 @@ Panel {
                       placeholderText: "SSH password, if there is no key"
                       foreground: root.foreground
                       font.family: root.fontFamily
-                      onTextChanged: if (root.sshPassText !== text) root.sshPassText = text
+                      onTextEdited: if (root.sshPassText !== text) root.sshPassText = text
                       onActiveFocusChanged: root.sshEdit = activeFocus
                       Keys.onReturnPressed: root.retrySelectedSsh()
                     }
 
-                    Row {
+                    Flow {
+                      width: parent.width
                       spacing: Style.space(14)
                       Text {
                         visible: Model.osLabel(modelData.os) !== "Windows" && root.sshFailedFor(modelData.name)
@@ -791,7 +796,10 @@ Panel {
                         MouseArea {
                           anchors.fill: parent
                           cursorShape: Qt.PointingHandCursor
-                          onClicked: service.restartPeer(modelData.name)
+                          onClicked: {
+                            service.restartPeer(modelData.name, root.sshUserText.trim(), root.sshPassText)
+                            root.sshPassText = ""
+                          }
                         }
                       }
                       Text {
@@ -977,7 +985,8 @@ Panel {
             ToggleSwitch {
               id: clipSwitch
               checked: service.status.clipboardEnabled
-              onToggled: service.setClipboard(checked)
+              busy: service.busy
+              onToggled: service.setClipboard(!checked)
             }
 
             Text {

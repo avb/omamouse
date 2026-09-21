@@ -4,6 +4,12 @@ set -euo pipefail
 ID=io.github.avb.omamouse
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 DEST="$HOME/.config/omarchy/plugins/$ID"
+for id in "$ID" io.github.dicebagstudios.omamouse io.github.dicebagstudios.omamice io.github.dicebagstudios.lan-mouse; do
+  candidate=$(realpath -m "$HOME/.config/omarchy/plugins/$id")
+  case "$HERE/" in
+    "$candidate/"*) echo "Run dev-install from a checkout outside the installed plugin directories." >&2; exit 1 ;;
+  esac
+done
 omarchy plugin validate "$HERE"
 mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST" \

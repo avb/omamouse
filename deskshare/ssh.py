@@ -1,9 +1,7 @@
 """Run a command on a Tailscale peer.
 
-Classic OpenSSH is used against the short Tailscale hostname (spatha, not
-spatha.taild30dae.ts.net), then the Tailscale IPv4 if that name does not
-connect. Host keys are fetched with ssh-keyscan over Tailscale and accepted
-automatically. That is safe here because the path is already the tailnet.
+Classic OpenSSH uses Tailscale addresses, with DNS names as fallbacks.
+New host keys use OpenSSH's accept-new policy; changed keys are rejected.
 
 A username is remembered per peer. A password is never stored. When one is
 supplied for this attempt, OpenSSH gets it through ASKPASS, then we copy this
@@ -16,17 +14,11 @@ import json
 import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from . import paths
-
-
-def _short_name(value: str) -> str:
-    value = (value or "").strip().rstrip(".")
-    if not value or _looks_ip(value):
-        return value
-    return value.split(".", 1)[0]
 
 
 def _targets(host: str, peer: dict | None) -> list[str]:
@@ -39,18 +31,13 @@ def _targets(host: str, peer: dict | None) -> list[str]:
             seen.add(value)
             names.append(value)
 
-    add(_short_name(host))
     if peer:
-        add(_short_name(str(peer.get("name") or "")))
-        add(_short_name(str(peer.get("dnsName") or "")))
         for ip in peer.get("ips") or []:
             add(str(ip))
+        add(str(peer.get("dnsName") or ""))
+        add(str(peer.get("name") or ""))
+    add(host)
     return names
-
-
-def _looks_ip(value: str) -> bool:
-    parts = value.split(".")
-    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts if p)
 
 
 def _connect_timeout(timeout: float) -> str:
@@ -90,7 +77,7 @@ def save_user(host: str, user: str) -> None:
     data = load_users()
     data[host] = user
     paths.ensure()
-    paths.SSH_USERS_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    paths.atomic_write(paths.SSH_USERS_PATH, json.dumps(data, indent=2) + "\n")
     paths.SSH_USERS_PATH.chmod(0o600)
 
 
@@ -106,62 +93,13 @@ def _is_auth_failure(text: str) -> bool:
     return "permission denied" in t or "authentication failed" in t or "invalid user" in t
 
 
-def trust_host_keys(host: str, peer: dict | None) -> None:
-    """Record the peer's SSH host key under every Tailscale name we use."""
-    names = _targets(host, peer)
-    if not names:
-        return
-    scan_from = [n for n in names if _looks_ip(n)] or names
-    scanned: list[tuple[str, str]] = []
-    for target in scan_from:
-        try:
-            proc = subprocess.run(
-                ["ssh-keyscan", "-T", "4", "-t", "ed25519,ecdsa,rsa", target],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) >= 3:
-                scanned.append((parts[1], parts[2]))
-        if scanned:
-            break
-    if not scanned:
-        return
-    path = _known_hosts()
-    existing = path.read_text() if path.exists() else ""
-    aliases = ",".join(names)
-    added = False
-    with path.open("a") as handle:
-        for key_type, blob in scanned:
-            needle = f"{key_type} {blob}"
-            already = any(
-                needle in line and all(name in line.split()[0].split(",") for name in names)
-                for line in existing.splitlines()
-                if line.strip() and not line.startswith("#")
-            )
-            if already:
-                continue
-            handle.write(f"{aliases} {key_type} {blob}\n")
-            added = True
-    if added:
-        path.chmod(0o600)
-
-
 def _askpass_env(password: str) -> tuple[dict[str, str], Path | None]:
     env = os.environ.copy()
     if not password:
         return env, None
     paths.ensure()
-    passfile = paths.RUNTIME_DIR / "ssh-pass"
-    fd = os.open(str(passfile), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, name = tempfile.mkstemp(prefix="ssh-pass-", dir=paths.RUNTIME_DIR)
+    passfile = Path(name)
     with os.fdopen(fd, "w") as handle:
         handle.write(password)
     askpass = paths.PLUGIN_ROOT / "scripts" / "ssh-askpass"
@@ -210,7 +148,7 @@ def _cmd(target: str, argv: list[str], timeout: float, user: str = "", password:
         ]
     else:
         cmd += ["-o", "BatchMode=yes"]
-    cmd += [dest, "--", remote]
+    cmd += ["--", dest, remote]
     return cmd
 
 
@@ -252,7 +190,6 @@ class Session:
         self.target = ""
         self.via = "ssh"
         self.last: subprocess.CompletedProcess[Any] | None = None
-        self._trusted = False
 
     def run(
         self,
@@ -262,9 +199,6 @@ class Session:
         input: str | bytes | None = None,
     ) -> subprocess.CompletedProcess[Any]:
         text_mode = not isinstance(input, (bytes, bytearray))
-        if not self._trusted:
-            trust_host_keys(self.host, self.peer)
-            self._trusted = True
         if self.target:
             return self._one(self.target, argv, timeout, input, text_mode)
 
@@ -274,7 +208,11 @@ class Session:
             last = proc
             if _is_auth_failure(_stderr_text(proc)):
                 return proc
-            if proc.returncode in (255, 124, 127):
+            # A timeout may follow a successful remote mutation. Never replay it.
+            if proc.returncode == 255 and any(message in _stderr_text(proc).lower() for message in (
+                "could not resolve hostname", "connection refused", "no route to host",
+                "network is unreachable", "connection timed out",
+            )):
                 continue
             self.target = target
             return proc

@@ -30,12 +30,21 @@ def status() -> dict:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return empty
+    if not isinstance(data, dict):
+        return empty
     self_info = data.get("Self") or {}
+    if not isinstance(self_info, dict):
+        return empty
     ips = [ip for ip in (self_info.get("TailscaleIPs") or []) if ":" not in ip]
     dns = str(self_info.get("DNSName") or "").rstrip(".")
     host = dns.split(".")[0] if dns else str(self_info.get("HostName") or "")
     peers = []
-    for node in (data.get("Peer") or {}).values():
+    peer_data = data.get("Peer") or {}
+    if not isinstance(peer_data, dict):
+        return empty
+    for node in peer_data.values():
+        if not isinstance(node, dict):
+            continue
         os_name = str(node.get("OS") or "")
         peer_ips = [ip for ip in (node.get("TailscaleIPs") or []) if ":" not in ip]
         peer_dns = str(node.get("DNSName") or "").rstrip(".")

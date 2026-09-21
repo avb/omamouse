@@ -11,6 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deskshare.ssh import Session, load_user
+from deskshare.ctl import clipboard_on
+from deskshare.remote import linux_environment
 
 
 def paste() -> bytes:
@@ -18,18 +20,22 @@ def paste() -> bytes:
         proc = subprocess.run(["wl-paste", "-n"], check=False, capture_output=True, timeout=1)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return b""
-    return proc.stdout[: 256 * 1024]
+    if proc.returncode or len(proc.stdout) > 256 * 1024:
+        return b""
+    return proc.stdout
 
 
 def ssh_copy(host: str, os_name: str, data: bytes, ip: str = "") -> bool:
-    remote = ["pbcopy"] if os_name.lower().startswith("mac") or os_name.lower() == "darwin" else ["wl-copy"]
+    if os_name.lower() == "windows":
+        return False
+    remote = ["pbcopy"] if os_name.lower().startswith("mac") or os_name.lower() == "darwin" else ["bash", "-c", linux_environment() + "\nexec wl-copy"]
     peer = {"name": host, "ips": [ip] if ip else []}
     proc = Session(host, peer, user=load_user(host)).run(remote, timeout=6, input=data)
     return proc.returncode == 0
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or not clipboard_on():
         raise SystemExit(0)
     host = sys.argv[1]
     ip = sys.argv[2] if len(sys.argv) > 2 else ""

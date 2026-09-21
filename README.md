@@ -43,11 +43,11 @@ Push the pointer off the edge you placed. It shows up on the other screen. Slide
 
 If the pointer is stuck on this machine, Release pointer in the panel, or `u`. If it left this screen and the other computer is down, turn OmaMouse off in the bar.
 
-Restart there kills the app on the other computer and opens it again. Forget pair drops the edge here and the pairing file over there.
+Restart there kills the app on the other computer and opens it again. Forget pair removes this pairing on both sides while preserving other peers. If the other computer is unavailable, the panel reports that its pairing still needs to be removed there.
 
 ## Clipboard
 
-When the pointer enters the other computer, this machine's clipboard is sent with it. Turn that row off if you do not want that.
+When the pointer enters a Linux or Mac computer, this machine's clipboard is sent with it over SSH. Turn that row off if you do not want that. Clipboard contents larger than 256 KiB are skipped. Automatic clipboard transfer to Windows is not supported.
 
 The other direction is a one-liner on that computer:
 
@@ -81,6 +81,17 @@ omarchy plugin remove io.github.avb.omamouse
 ```
 
 Pairing files in `~/.config/lan-mouse/` stay, so a reinstall does not mean pairing again.
+
+## Development checks
+
+The controller requires Python 3.11 or newer. Run the regression checks from this checkout:
+
+```sh
+python3 -m unittest discover -s tests -v
+node tests/model.test.cjs
+```
+
+The tests use temporary files and mocked SSH sessions. They do not change a desktop session or contact peers.
 
 ## License
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 
-from . import paths, tailscale
+from . import config, paths, tailscale
 from .ssh import Session
 
 
@@ -22,7 +22,7 @@ def load_peer_health() -> dict:
 
 def save_peer_health(data: dict) -> None:
     paths.ensure()
-    paths.PEER_HEALTH_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    paths.atomic_write(paths.PEER_HEALTH_PATH, json.dumps(data, indent=2) + "\n")
     paths.PEER_HEALTH_PATH.chmod(0o600)
 
 
@@ -37,7 +37,10 @@ def local_health() -> dict:
     if not paths.LOG_PATH.exists():
         return empty
     try:
-        lines = paths.LOG_PATH.read_text(errors="replace").splitlines()[-400:]
+        with paths.LOG_PATH.open("rb") as log:
+            log.seek(0, 2)
+            log.seek(max(0, log.tell() - 128 * 1024))
+            lines = log.read().decode(errors="replace").splitlines()[-400:]
     except OSError:
         return empty
     emu = ""
@@ -68,7 +71,7 @@ def local_health() -> dict:
     }
 
 
-def probe_peer(name: str, local_fp: str = "") -> dict:
+def probe_peer(name: str, local_fp: str = "", port: int = paths.PORT_DEFAULT, user: str = "", password: str = "") -> dict:
     peer = tailscale.find_peer(name)
     result = {
         "name": name,
@@ -86,20 +89,28 @@ def probe_peer(name: str, local_fp: str = "") -> dict:
     if not peer.get("online"):
         result["error"] = "offline"
         return result
+    from .remote import os_kind
+
+    if os_kind(peer.get("os") or "") not in ("mac", "linux"):
+        result.update(remoteRunning=None, remotePaired=None, error="Check this peer manually")
+        return result
+    config.port(port)
     fp = (local_fp or "").lower()
     script = r"""
 echo RUNNING=$(pgrep -x lan-mouse >/dev/null 2>&1 && echo yes || echo no)
-if lsof -nP -iUDP:4242 >/dev/null 2>&1; then echo UDP=yes
-elif netstat -an 2>/dev/null | grep -q '\.4242'; then echo UDP=yes
+if ss -H -lun "sport = :4242" 2>/dev/null | grep -q .; then echo UDP=yes
+elif lsof -nP -iUDP:4242 >/dev/null 2>&1; then echo UDP=yes
+elif netstat -an 2>/dev/null | grep -Eq '[.:]4242[[:space:]]'; then echo UDP=yes
 else echo UDP=no
 fi
-cfg="$HOME/.config/lan-mouse/config.toml"
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/lan-mouse/config.toml"
 if [ -f "$cfg" ]; then echo HAS_CONFIG=yes; else echo HAS_CONFIG=no; fi
 echo CONFIG_HEAD
-sed -n '1,80p' "$cfg" 2>/dev/null || true
+cat "$cfg" 2>/dev/null || true
 echo CONFIG_TAIL
 """
-    sess = Session(name, peer)
+    script = script.replace("4242", str(port))
+    sess = Session(name, peer, user=user, password=password)
     proc = sess.run_script(script, timeout=10)
     out = (proc.stdout if isinstance(proc.stdout, str) else "") + "\n" + (
         proc.stderr if isinstance(proc.stderr, str) else ""
@@ -111,40 +122,46 @@ echo CONFIG_TAIL
     result["ssh"] = True
     result["remoteRunning"] = "RUNNING=yes" in out
     result["remoteUdp"] = "UDP=yes" in out
-    if fp and fp in out.lower():
-        result["remotePaired"] = True
-    elif "HAS_CONFIG=yes" in out and fp:
+    try:
+        remote_cfg = config.parse(out.split("CONFIG_HEAD\n", 1)[1].split("CONFIG_TAIL", 1)[0])
+        result["remotePaired"] = bool(fp and fp in remote_cfg["authorized_fingerprints"])
+    except (ValueError, IndexError):
+        result["error"] = "Could not read remote pairing configuration"
+    if not result["remotePaired"] and fp and not result["error"]:
         result["remotePaired"] = False
         result["error"] = "pairing missing on that machine"
     if not result["remoteRunning"] and result["ssh"]:
         result["error"] = result["error"] or "lan-mouse is not running there"
     elif result["remoteRunning"] and not result["remoteUdp"]:
-        result["error"] = result["error"] or "not listening on UDP 4242"
+        result["error"] = result["error"] or f"not listening on UDP {port}"
     return result
 
 
-def probe_configured(names: list[str], local_fp: str) -> dict:
+def probe_configured(clients: list[dict], local_fp: str) -> dict:
     health = load_peer_health()
-    for name in names:
+    for client in clients:
+        name = client.get("hostname")
         if not name:
             continue
-        health[name] = probe_peer(name, local_fp)
+        health[name] = probe_peer(name, local_fp, client.get("port", paths.PORT_DEFAULT))
     save_peer_health(health)
     return health
 
 
-def restart_remote(name: str) -> dict:
+def restart_remote(name: str, user: str = "", password: str = "") -> dict:
     """Restart lan-mouse in the peer's graphical session and keep our pairing file."""
     from . import remote
 
     peer = tailscale.find_peer(name)
     if peer is None:
         return {"ok": False, "error": f"no Tailscale machine named {name}"}
-    sess = Session(name, peer)
+    sess = Session(name, peer, user=user, password=password)
     kind = remote.os_kind(peer.get("os") or "")
+    if kind not in ("mac", "linux"):
+        return {"ok": False, "error": "Restart lan-mouse manually on this computer"}
     if kind == "mac":
         script = r"""
-cfg="$HOME/.config/lan-mouse/config.toml"
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/lan-mouse/config.toml"
 tmp=$(mktemp)
 if [ -f "$cfg" ]; then cp "$cfg" "$tmp"; fi
 killall lan-mouse 2>/dev/null || true
@@ -158,7 +175,7 @@ while [ "$i" -lt 20 ]; do
 done
 sleep 0.6
 if [ -s "$tmp" ]; then
-  mkdir -p "$HOME/.config/lan-mouse"
+  mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/lan-mouse"
   cp "$tmp" "$cfg"
 fi
 rm -f "$tmp"
@@ -169,11 +186,14 @@ pgrep -x lan-mouse >/dev/null 2>&1 && echo restarted || echo not_running
 pkill -x lan-mouse 2>/dev/null || true
 sleep 0.3
 if command -v lan-mouse >/dev/null; then
-  nohup lan-mouse daemon >/tmp/lan-mouse.log 2>&1 &
+  mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/lan-mouse"
+  nohup lan-mouse daemon </dev/null >"${XDG_CONFIG_HOME:-$HOME/.config}/lan-mouse/omamouse.log" 2>&1 &
 fi
 sleep 0.4
 pgrep -x lan-mouse >/dev/null 2>&1 && echo restarted || echo not_running
 """
+    if kind == "linux":
+        script = remote.linux_environment() + "\n" + script
     proc = sess.run_script(script, timeout=20)
     out = (proc.stdout if isinstance(proc.stdout, str) else "") + (
         proc.stderr if isinstance(proc.stderr, str) else ""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 PLUGIN_ID = "io.github.avb.omamouse"
@@ -12,10 +13,11 @@ LEGACY_PLUGIN_IDS = (
 )
 PORT_DEFAULT = 4242
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = Path.home() / ".config" / "lan-mouse" / "config.toml"
-CERT_PATH = Path.home() / ".config" / "lan-mouse" / "lan-mouse.pem"
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / PLUGIN_ID
-RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / PLUGIN_ID
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "lan-mouse"
+CONFIG_PATH = CONFIG_DIR / "config.toml"
+CERT_PATH = CONFIG_DIR / "lan-mouse.pem"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / PLUGIN_ID
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / PLUGIN_ID
 PID_PATH = RUNTIME_DIR / "lan-mouse.pid"
 LOG_PATH = RUNTIME_DIR / "lan-mouse.log"
 DESIRED_PATH = STATE_DIR / "desired"
@@ -26,6 +28,18 @@ SSH_USERS_PATH = STATE_DIR / "ssh-users.json"
 PEER_HEALTH_PATH = STATE_DIR / "peer-health.json"
 PUSH_SCRIPT = PLUGIN_ROOT / "scripts" / "clipboard-push"
 RELEASE_BIND = ["KeyLeftCtrl", "KeyLeftShift", "KeyLeftMeta", "KeyLeftAlt"]
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Readers see the old or new file, never a truncated intermediate file."""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def _adopt_legacy(dest: Path) -> None:

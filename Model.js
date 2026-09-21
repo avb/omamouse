@@ -28,34 +28,29 @@ function emptyStatus() {
   }
 }
 
-function parseStatus(raw) {
-  var text = String(raw || "").trim()
-  if (text === "") return emptyStatus()
+function parseStatus(raw, previous) {
+  var result = Object.assign(emptyStatus(), previous || {})
+  var data
   try {
-    var data = JSON.parse(text)
+    data = JSON.parse(String(raw || ""))
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid status")
   } catch (e) {
-    var failed = emptyStatus()
-    failed.error = "status was not JSON"
-    return failed
+    result.ok = false
+    result.error = "status was not valid JSON"
+    return result
   }
-  if (typeof data !== "object" || data === null) return emptyStatus()
-  if (data.ok === false) {
-    var err = emptyStatus()
-    err.error = String(data.error || "command failed")
-    err.packageInstalled = data.packageInstalled === true
-    err.tailscale = data.tailscale || err.tailscale
-    return err
-  }
-  if (!Array.isArray(data.machines)) data.machines = []
-  if (!Array.isArray(data.authorized)) data.authorized = []
-  if (!data.tailscale) data.tailscale = emptyStatus().tailscale
-  return data
+  Object.assign(result, data)
+  result.error = data.ok === false ? String(data.error || "command failed") : ""
+  if (!Array.isArray(result.machines)) result.machines = []
+  if (!Array.isArray(result.authorized)) result.authorized = []
+  result.tailscale = Object.assign(emptyStatus().tailscale, previous && previous.tailscale || {}, data.tailscale || {})
+  return result
 }
 
 function shareableMachines(machines) {
   var out = []
   for (var i = 0; i < machines.length; i++) {
-    if (machines[i].shareable) out.push(machines[i])
+    if (machines[i] && machines[i].shareable) out.push(machines[i])
   }
   return out
 }

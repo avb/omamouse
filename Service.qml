@@ -15,10 +15,11 @@ Item {
   property bool probing: probeProcess.running
   property bool restoring: false
   property string pendingSecret: ""
+  property int actionGeneration: 0
 
   readonly property string ctlPath: {
     var u = pluginRootUrl.toString()
-    if (u.indexOf("file://") === 0) u = u.substring(7)
+    if (u.indexOf("file://") === 0) u = decodeURIComponent(u.substring(7))
     if (u.charAt(0) !== "/") {
       var home = Quickshell.env("HOME") || ""
       u = home + "/.config/omarchy/plugins/io.github.avb.omamouse/"
@@ -33,21 +34,23 @@ Item {
   }
   readonly property bool restoreDaemon: !(settings && settings.restoreDaemon === false)
 
-  function applyPayload(raw) {
-    var parsed = Model.parseStatus(raw)
+  function applyPayload(raw, isAction) {
+    var parsed = Model.parseStatus(raw, status)
     if (parsed.ok === false && parsed.error) lastError = parsed.error
-    else lastError = ""
+    else if (isAction) lastError = ""
     status = parsed
   }
 
   function refresh() {
-    if (statusProcess.running) return
+    if (statusProcess.running || actionProcess.running) return
+    statusProcess.generation = actionGeneration
     statusProcess.command = ["python3", ctlPath, "status"]
     statusProcess.running = true
   }
 
   function runVerb(args, secret) {
     if (actionProcess.running) return
+    actionGeneration += 1
     lastError = ""
     pendingSecret = secret || ""
     actionProcess.stdinEnabled = pendingSecret !== ""
@@ -96,6 +99,7 @@ Item {
   function copyInstructions(name) { runVerb(["copy-instructions", "--name", name]) }
   function probePeers() {
     if (probeProcess.running || actionProcess.running) return
+    probeProcess.generation = actionGeneration
     probeProcess.command = ["python3", ctlPath, "probe-peers"]
     probeProcess.running = true
   }
@@ -107,24 +111,29 @@ Item {
   }
   function forgetPeer(name) { runVerb(["forget-peer", "--name", name]) }
   function restore() {
-    if (!restoreDaemon || restoring) return
+    if (!restoreDaemon || restoring || actionProcess.running) return
     restoring = true
     runVerb(["restore"])
   }
 
   Process {
     id: statusProcess
+    property int generation: 0
     stdout: StdioCollector {
-      onStreamFinished: root.applyPayload(text)
+      onStreamFinished: {
+        if (!actionProcess.running && statusProcess.generation === root.actionGeneration) root.applyPayload(text, false)
+      }
     }
-    onExited: root.refreshingDone()
+    onExited: {
+      if (generation !== root.actionGeneration) Qt.callLater(root.refresh)
+    }
   }
 
   Process {
     id: actionProcess
     stdinEnabled: false
     stdout: StdioCollector {
-      onStreamFinished: root.applyPayload(text)
+      onStreamFinished: root.applyPayload(text, true)
     }
     stderr: StdioCollector {
       onStreamFinished: {
@@ -138,17 +147,19 @@ Item {
       }
     }
     onExited: {
+      root.pendingSecret = ""
       root.restoring = false
       root.refresh()
     }
   }
 
-  function refreshingDone() {}
-
   Process {
     id: probeProcess
+    property int generation: 0
     stdout: StdioCollector {
-      onStreamFinished: root.applyPayload(text)
+      onStreamFinished: {
+        if (!actionProcess.running && probeProcess.generation === root.actionGeneration) root.applyPayload(text, false)
+      }
     }
   }
 

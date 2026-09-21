@@ -4,8 +4,12 @@ import json
 import shlex
 import subprocess
 
-from . import paths, tailscale
+from . import config, paths, tailscale
 from .ssh import Session, install_login_key, save_user
+
+
+class RemoteReadError(ValueError):
+    """The remote config could not be fetched over SSH."""
 
 MAC_ARM = "https://github.com/feschber/lan-mouse/releases/latest/download/lan-mouse-macos-arm64.zip"
 MAC_INTEL = "https://github.com/feschber/lan-mouse/releases/latest/download/lan-mouse-macos-intel.zip"
@@ -79,7 +83,7 @@ def load_last() -> dict:
 
 def save_last(data: dict) -> None:
     paths.ensure()
-    paths.LAST_INSTALL_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    paths.atomic_write(paths.LAST_INSTALL_PATH, json.dumps(data, indent=2) + "\n")
     paths.LAST_INSTALL_PATH.chmod(0o600)
 
 
@@ -151,6 +155,12 @@ def install_mac(name: str, peer: dict | None = None, user: str = "", password: s
         save_last(result)
         return result
 
+    if "app_present" in stdout.splitlines():
+        result["method"] = "existing"
+        result["installed"] = True
+        save_last(result)
+        return result
+
     if has_brew:
         brew = sess.run_script(
             "eval \"$(/opt/homebrew/bin/brew shellenv 2>/dev/null)\"; eval \"$(/usr/local/bin/brew shellenv 2>/dev/null)\"; brew install lan-mouse",
@@ -171,6 +181,7 @@ def install_mac(name: str, peer: dict | None = None, user: str = "", password: s
     script = f"""
 set -e
 tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 curl -fsSL -o lm.zip '{zip_url}'
 unzip -q lm.zip
@@ -213,7 +224,7 @@ def install_linux(name: str, peer: dict | None = None, user: str = "", password:
         "sshUser": sess.user,
         "keyCopied": False,
     }
-    probe = sess.run_script("echo ok; command -v pacman; command -v lan-mouse || true", timeout=15)
+    probe = sess.run_script("echo ok; whoami; command -v pacman; command -v lan-mouse && echo bin_present || true", timeout=15)
     stdout = probe.stdout if isinstance(probe.stdout, str) else ""
     stderr = probe.stderr if isinstance(probe.stderr, str) else ""
     result["ssh"] = probe.returncode == 0 and "ok" in stdout
@@ -222,6 +233,11 @@ def install_linux(name: str, peer: dict | None = None, user: str = "", password:
     result["log"] = _clip(stdout + "\n" + stderr)
     result = _after_ssh(sess, name, password, result["ssh"], result, stdout)
     if not result["ssh"]:
+        save_last(result)
+        return result
+    if "bin_present" in stdout.splitlines():
+        result["method"] = "existing"
+        result["installed"] = True
         save_last(result)
         return result
     has_pacman = any(line.rstrip().endswith("pacman") for line in stdout.splitlines())
@@ -345,7 +361,7 @@ def retry_ssh(name: str, user: str = "", password: str = "") -> dict:
     stdout, stderr = _proc_text(probe)
     ssh_ok = probe.returncode == 0 and "ok" in stdout
     present = "app_present" in stdout or "bin_present" in stdout
-    already = present or (last.get("name") == name and bool(last.get("installed")))
+    already = present
     result = {
         "name": name,
         "os": peer.get("os") or "",
@@ -405,34 +421,32 @@ def pair_peer(
     local_name: str = "",
     local_ip: str = "",
     local_position: str = "right",
+    local_port: int = paths.PORT_DEFAULT,
 ) -> dict:
     """Start lan-mouse on the peer and exchange fingerprints over SSH."""
     if peer is None:
-        return {"paired": False, "log": f"no Tailscale machine named {name}"}
-    if not local_fp:
-        return {
-            "paired": False,
-            "log": "Start lan-mouse on this computer first so we have a fingerprint to share.",
-        }
-    sess = Session(name, peer, user=user, password=password)
-    local_name = local_name or "dirk"
-    ret = _return_edge(local_position)
-    toml = (
-        "port = 4242\n"
-        'release_bind = ["KeyLeftCtrl", "KeyLeftShift", "KeyLeftMeta", "KeyLeftAlt"]\n'
-        "\n"
-        "[authorized_fingerprints]\n"
-        f'"{local_fp}" = "{local_name}"\n'
-        "\n"
-        "[[clients]]\n"
-        f'hostname = "{local_name}"\n'
-        f'position = "{ret}"\n'
-        f'ips = ["{local_ip}"]\n'
-        "port = 4242\n"
-        "activate_on_startup = true\n"
-    )
-    quoted = shlex.quote(toml.rstrip())
+        return {"paired": False, "error": f"no Tailscale machine named {name}"}
     kind = os_kind(peer.get("os") or "")
+    if kind not in ("mac", "linux"):
+        return {"paired": False, "error": "Pair this machine manually", "instructions": instructions(name, peer.get("os") or "")}
+    if not config.valid_fingerprint(local_fp) or not local_name or not local_ip:
+        return {"paired": False, "error": "A local fingerprint and connected Tailscale identity are required"}
+    sess = Session(name, peer, user=user, password=password)
+    ret = _return_edge(local_position)
+    try:
+        cfg = read_config(sess)
+    except RemoteReadError as exc:
+        return {"paired": False, "ssh": False, "needAuth": True, "error": str(exc)}
+    except (ValueError, OSError) as exc:
+        return {"paired": False, "error": str(exc)}
+    if sess.user:
+        save_user(name, sess.user)
+    cfg["authorized_fingerprints"] = {fp: host for fp, host in cfg["authorized_fingerprints"].items() if host != local_name}
+    cfg["authorized_fingerprints"][local_fp] = local_name
+    cfg["clients"] = [c for c in cfg["clients"] if c.get("hostname") != local_name and local_ip not in c.get("ips", [])]
+    if any(c.get("position") == ret for c in cfg["clients"]):
+        return {"paired": False, "error": f"The {ret} edge on {name} is already occupied"}
+    cfg["clients"].append({"hostname": local_name, "position": ret, "ips": [local_ip], "port": local_port, "activate_on_startup": True})
     # The Mac GUI can blank authorized_fingerprints. Start it in the login
     # graphical session (SSH-started `daemon` uses the dummy backend and
     # never moves the cursor), then write the config again after it maps.
@@ -441,8 +455,8 @@ def pair_peer(
 set -e
 killall lan-mouse 2>/dev/null || true
 sleep 0.3
-mkdir -p "$HOME/.config/lan-mouse"
-printf '%s\\n' {quoted} > "$HOME/.config/lan-mouse/config.toml"
+mkdir -p "${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse"
+{write_config_script(cfg)}
 open -a "Lan Mouse"
 i=0
 while [ "$i" -lt 20 ]; do
@@ -453,13 +467,13 @@ while [ "$i" -lt 20 ]; do
   sleep 0.2
 done
 sleep 0.6
-printf '%s\\n' {quoted} > "$HOME/.config/lan-mouse/config.toml"
-pem="$HOME/.config/lan-mouse/lan-mouse.pem"
+{write_config_script(cfg)}
+pem="${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse/lan-mouse.pem"
 i=0
 while [ "$i" -lt 25 ]; do
-  if [ -f "$pem" ]; then
+  if [ -f "$pem" ] && pgrep -x lan-mouse >/dev/null; then
     openssl x509 -in "$pem" -noout -fingerprint -sha256
-    grep -q {shlex.quote(local_fp)} "$HOME/.config/lan-mouse/config.toml" || {{ echo config_clobbered; exit 2; }}
+    grep -q {shlex.quote(local_fp)} "${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse/config.toml" || {{ echo config_clobbered; exit 2; }}
     exit 0
   fi
   i=$((i + 1))
@@ -473,17 +487,18 @@ exit 1
 set -e
 pkill -x lan-mouse 2>/dev/null || true
 sleep 0.2
-mkdir -p "$HOME/.config/lan-mouse"
-printf '%s\\n' {quoted} > "$HOME/.config/lan-mouse/config.toml"
+mkdir -p "${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse"
+{write_config_script(cfg)}
 if command -v lan-mouse >/dev/null; then
-  nohup lan-mouse daemon >/tmp/lan-mouse.log 2>&1 &
+  {linux_environment()}
+  nohup lan-mouse daemon </dev/null >"${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse/omamouse.log" 2>&1 &
 fi
 sleep 0.4
-printf '%s\\n' {quoted} > "$HOME/.config/lan-mouse/config.toml"
-pem="$HOME/.config/lan-mouse/lan-mouse.pem"
+{write_config_script(cfg)}
+pem="${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse/lan-mouse.pem"
 i=0
 while [ "$i" -lt 25 ]; do
-  if [ -f "$pem" ]; then
+  if [ -f "$pem" ] && pgrep -x lan-mouse >/dev/null; then
     openssl x509 -in "$pem" -noout -fingerprint -sha256
     exit 0
   fi
@@ -497,24 +512,30 @@ exit 1
     stdout, stderr = _proc_text(started)
     out = (stdout + "\n" + stderr).strip()
     fp = ""
-    if started.returncode == 0 and "=" in stdout:
-        fp = stdout.strip().split("=", 1)[1].strip().lower()
+    if started.returncode == 0:
+        for line in stdout.splitlines():
+            candidate = line.partition("=")[2].strip().lower()
+            if config.valid_fingerprint(candidate):
+                fp = candidate
     if "config_clobbered" in out:
         return {
             "paired": False,
             "remoteStarted": True,
+            "error": "The Mac app overwrote the pairing configuration",
             "log": _clip("lan-mouse on that Mac overwrote the pairing. Close the Lan Mouse window there, then Re-pair."),
         }
     if not fp:
         hint = " Grant Accessibility on that Mac if it asks, then Re-pair."
         return {
             "paired": False,
-            "remoteStarted": "no_cert" in out or started.returncode != 0,
+            "remoteStarted": False,
+            "error": _clip(out or "Remote lan-mouse did not start"),
             "log": _clip(out + (hint if kind == "mac" else "")),
         }
     return {
         "paired": True,
         "remoteFingerprint": fp,
+        "remotePort": cfg["port"],
         "remoteStarted": True,
         "returnEdge": ret,
         "log": (
@@ -540,9 +561,45 @@ def copy_instructions(name: str = "") -> dict:
             text = last["instructions"]
     if not text:
         return {"ok": False, "error": "no instructions to copy"}
-    import shutil
-    import subprocess
+    result = copy_text(text)
+    result["instructions"] = text
+    return result
 
-    if shutil.which("wl-copy"):
-        subprocess.run(["wl-copy"], input=(text + "\n").encode(), check=False, timeout=2)
-    return {"ok": True, "copied": True, "instructions": text}
+
+def copy_text(text: str) -> dict:
+    try:
+        proc = subprocess.run(["wl-copy"], input=(text + "\n").encode(), capture_output=True, check=False, timeout=2)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": f"Could not copy to clipboard: {exc}"}
+    if proc.returncode:
+        return {"ok": False, "error": proc.stderr.decode(errors="replace").strip() or "wl-copy failed"}
+    return {"ok": True, "copied": True}
+
+
+def read_config(sess: Session) -> dict:
+    proc = sess.run_script('cfg="${XDG_CONFIG_HOME:-$HOME/.config}/lan-mouse/config.toml"; if [ -f "$cfg" ]; then cat "$cfg"; fi')
+    stdout, stderr = _proc_text(proc)
+    if proc.returncode:
+        raise RemoteReadError(stderr.strip() or "Could not read remote configuration")
+    return config.parse(stdout)
+
+
+def write_config_script(cfg: dict) -> str:
+    quoted = shlex.quote(config.dumps(cfg))
+    return f"""cfg="${{XDG_CONFIG_HOME:-$HOME/.config}}/lan-mouse/config.toml"
+mkdir -p "$(dirname "$cfg")"
+tmp=$(mktemp "${{cfg}}.XXXXXX")
+chmod 600 "$tmp"
+printf '%s' {quoted} > "$tmp"
+mv "$tmp" "$cfg"
+"""
+
+
+def linux_environment() -> str:
+    return r"""export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  for socket in "$XDG_RUNTIME_DIR"/wayland-*; do
+    if [ -S "$socket" ]; then export WAYLAND_DISPLAY="${socket##*/}"; break; fi
+  done
+fi"""
