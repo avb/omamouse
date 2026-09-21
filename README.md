@@ -1,8 +1,10 @@
 # OmaMouse
 
-Share one keyboard and mouse across the machines on your Tailscale tailnet, from the Omarchy bar. Push the pointer off the edge of this screen and it appears on the next computer. Keystrokes follow it.
+Slide the mouse off the edge of this screen and it appears on another computer. The keyboard goes with it.
 
-The engine is [lan-mouse](https://github.com/feschber/lan-mouse). This plugin is ours: Tailscale discovery, pairing in the panel, and clipboard on pointer-enter. It is not a fork of other Omarchy lan-mouse widgets.
+OmaMouse lives in the Omarchy bar. It lists the machines on your Tailscale network, puts the sharing software on them, and lets you pick which edge of this screen leads where.
+
+Both computers need [Tailscale](https://tailscale.com) up and on the same tailnet. The stock Tailscale icon in the bar handles that.
 
 ## Install
 
@@ -10,71 +12,63 @@ The engine is [lan-mouse](https://github.com/feschber/lan-mouse). This plugin is
 omarchy plugin add https://github.com/avb/omamouse.git --enable
 ```
 
-Click the mouse icon, then install lan-mouse from the panel if it is missing, or:
+Click the mouse icon. If this computer is missing the sharing software, the panel offers to install it. Turn the switch on.
 
-```sh
-~/.config/omarchy/plugins/io.github.avb.omamouse/setup
-```
+## Pair a computer
 
-Turn the switch on. Tailscale has to be connected first.
+The panel lists Linux, macOS, and Windows machines from Tailscale. Click a name, then Install. That copies the app over SSH, starts it, and swaps fingerprints so the pointer can cross.
 
-On this computer, the panel's **Install lan-mouse on this computer** link runs `omarchy pkg add lan-mouse`.
+Then click an edge on the layout map. Off this edge goes there. Off their opposite edge comes back.
 
-## Pair a machine
+If SSH does not accept this computer's user or key, the panel asks for a username and password. The password is not stored. A working login copies this computer's public key over so the next time does not need it.
 
-The panel lists Tailscale peers that can run lan-mouse (Linux, macOS, Windows). Click a name to select it, then:
+**macOS.** Grant Accessibility when the Mac asks. The app has to run in the logged-in desktop session. A process started over SSH never moves the cursor. Install and Re-pair open it on the desktop, then write the pairing file again, because the Mac window can blank fingerprints.
 
-- **Install** puts lan-mouse on that machine over SSH, starts it, and exchanges fingerprints so the pointer can cross
-- **Layout** is a map of this screen. Click a computer, then click an edge. That sets this machine and the opposite edge on the other computer so the pointer comes back.
-- **Retry SSH** and the user/password fields appear only if that first SSH attempt fails
-- **Copy steps** is the hand-install fallback, also only after SSH fails (always for Windows)
-- **Restart there** kills and reopens Lan Mouse on that computer (Mac: desktop session, then rewrite pairing)
-- **Forget pair** removes the edge here and the pairing file on that computer
-- **Release pointer** drops a stuck capture on this machine
+**Windows.** Install is always by hand. Copy steps, run the zip, then paste the fingerprint under Allow a peer in.
 
-**macOS.** SSH uses the short Tailscale hostname (`spatha`, not the `.ts.net` name), then the Tailscale IP if that name does not connect. Host keys are accepted automatically. If usernames differ or there is no key, the panel asks for an SSH user and password after the first failure. The password is not stored. If it works we copy this computer's public key over. After the app is on the Mac we start it, write this computer's fingerprint into its config, and pull its fingerprint back so both sides are authorized. Grant Accessibility if macOS asks.
+**Linux.** Install uses `pacman` over SSH when it is there. Otherwise copy steps.
 
-Both sides can send. Off this right goes to tachi; off tachi’s left comes here. While the pointer is on the other computer, that computer’s mouse is captured. Slide back to the facing edge, or Control+Shift+Alt+Super (on a Mac: Control+Shift+Option+Command). **Release pointer** in the panel (or `u`) drops a stuck capture on this machine.
+To pair by hand on the other computer:
 
-On a Mac, Lan Mouse has to run in the logged-in desktop session. A daemon started over SSH uses a dummy backend and never moves the cursor. Re-pair opens the app in that session, then writes the pairing file again because the window can blank fingerprints. If the pointer leaves this screen and the other computer is down, toggle OmaMouse off in the bar to get the cursor back.
-
-**Windows.** Always manual. Copy steps and run the zip.
-
-**Linux.** Over SSH we try `pacman` when it is there. Otherwise copy steps.
-
-On the other computer, if you installed by hand:
-
-1. Install [lan-mouse](https://github.com/feschber/lan-mouse/releases). On a Mac, drop the .app in Applications, clear quarantine with `xattr -rd com.apple.quarantine "Lan Mouse.app"`, and grant Accessibility.
+1. Install [lan-mouse](https://github.com/feschber/lan-mouse/releases). On a Mac, put `Lan Mouse.app` in Applications, run `xattr -rd com.apple.quarantine "Lan Mouse.app"`, and grant Accessibility.
 2. Start it and copy its fingerprint.
-3. Back here, paste that fingerprint under **Allow a peer in** with the Tailscale hostname.
-4. On the other computer, authorize *this* machine's fingerprint the same way.
+3. In OmaMouse, paste that fingerprint under Allow a peer in, with the Tailscale hostname.
+4. On the other computer, authorize this machine's fingerprint the same way.
 
-UDP `4242` has to reach the peer on Tailscale. If a Mac still cannot connect, check Tailscale is up on both sides and that neither end is using an exit node that blocks peer-to-peer.
+UDP 4242 has to reach the peer on Tailscale. If a Mac still will not connect, check Tailscale is up on both sides and that neither end is using an exit node that blocks peer-to-peer.
+
+## Using it
+
+Push the pointer off the edge you placed. It shows up on the other screen. Slide back the other way to return, or press Control+Shift+Alt+Super. On a Mac that is Control+Shift+Option+Command.
+
+If the pointer is stuck on this machine, Release pointer in the panel, or `u`. If it left this screen and the other computer is down, turn OmaMouse off in the bar.
+
+Restart there kills the app on the other computer and opens it again. Forget pair drops the edge here and the pairing file over there.
 
 ## Clipboard
 
-When the pointer enters a peer, `scripts/clipboard-push` runs. It sends `wl-paste` over SSH to `pbcopy` on macOS or `wl-copy` on Linux. Turn the clipboard row off if you do not want that.
+When the pointer enters the other computer, this machine's clipboard is sent with it. Turn that row off if you do not want that.
 
-The reverse direction needs a hook on the other computer:
+The other direction is a one-liner on that computer:
 
 ```sh
-pbpaste | ssh dirk wl-copy
+pbpaste | ssh this-machine wl-copy
 ```
 
 ## Keys
 
 | Key | Action |
 |-----|--------|
-| `s` | Start or stop lan-mouse |
+| `s` | Start or stop sharing |
 | `u` | Release a stuck pointer on this machine |
 | `c` | Copy this machine's fingerprint |
 | `b` | Toggle clipboard |
 | `x` | Remove the highlighted peer |
 | `r` | Refresh |
-| `i` | Install lan-mouse on the selected peer, or on this computer |
+| `i` | Install on the selected peer, or on this computer |
 | `n` | Install on the selected peer |
 | `t` | Retry SSH to the selected peer |
-| `a` | Add or cycle the selected peer's screen edge |
+| `a` | Place the selected peer on an edge |
 | Esc | Close |
 
 Right click the bar icon to start or stop. Middle click refreshes.
@@ -86,8 +80,8 @@ omarchy-shell io.github.avb.omamouse stop
 omarchy plugin remove io.github.avb.omamouse
 ```
 
-`~/.config/lan-mouse/` is left alone so you can reinstall without pairing again.
+Pairing files in `~/.config/lan-mouse/` stay, so a reinstall does not mean pairing again.
 
 ## License
 
-MIT. lan-mouse itself is GPL-3.0-or-later. This plugin talks to it as a separate program.
+MIT. Pointer traffic is handled by [lan-mouse](https://github.com/feschber/lan-mouse) under GPL-3.0-or-later. OmaMouse talks to it as a separate program.
