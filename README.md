@@ -1,4 +1,4 @@
-# Lan Mouse for Omarchy
+# OmaMouse
 
 Share one keyboard and mouse across the machines on your Tailscale tailnet, from the Omarchy bar. Push the pointer off the edge of this screen and it appears on the next computer. Keystrokes follow it.
 
@@ -7,13 +7,13 @@ The engine is [lan-mouse](https://github.com/feschber/lan-mouse). This plugin is
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/dicebagstudios/omarchy-lan-mouse.git --enable
+omarchy plugin add https://github.com/avb/omamouse.git --enable
 ```
 
 Click the mouse icon, then install lan-mouse from the panel if it is missing, or:
 
 ```sh
-~/.config/omarchy/plugins/io.github.dicebagstudios.lan-mouse/setup
+~/.config/omarchy/plugins/io.github.avb.omamouse/setup
 ```
 
 Turn the switch on. Tailscale has to be connected first.
@@ -24,11 +24,19 @@ On this computer, the panel's **Install lan-mouse on this computer** link runs `
 
 The panel lists Tailscale peers that can run lan-mouse (Linux, macOS, Windows). Click a name to select it, then:
 
-- **Install** tries to put lan-mouse on that machine
-- **Copy steps** puts the hand-install instructions on the clipboard
-- **Use on the right** (or Edge) adds it to the pointer layout
+- **Install** puts lan-mouse on that machine over SSH, starts it, and exchanges fingerprints so the pointer can cross
+- **Layout** is a map of this screen. Click a computer, then click an edge. That sets this machine and the opposite edge on the other computer so the pointer comes back.
+- **Retry SSH** and the user/password fields appear only if that first SSH attempt fails
+- **Copy steps** is the hand-install fallback, also only after SSH fails (always for Windows)
+- **Restart there** kills and reopens Lan Mouse on that computer (Mac: desktop session, then rewrite pairing)
+- **Forget pair** removes the edge here and the pairing file on that computer
+- **Release pointer** drops a stuck capture on this machine
 
-**macOS.** If Tailscale SSH answers, we look for Homebrew and run `brew install lan-mouse`. There is often no formula, so we then download the official `.app` zip over SSH into `/Applications`. If SSH is off, or Homebrew is missing and the zip fails, the panel shows the manual steps. Enable SSH from the Tailscale menu on the Mac if you want the panel to do it next time.
+**macOS.** SSH uses the short Tailscale hostname (`spatha`, not the `.ts.net` name), then the Tailscale IP if that name does not connect. Host keys are accepted automatically. If usernames differ or there is no key, the panel asks for an SSH user and password after the first failure. The password is not stored. If it works we copy this computer's public key over. After the app is on the Mac we start it, write this computer's fingerprint into its config, and pull its fingerprint back so both sides are authorized. Grant Accessibility if macOS asks.
+
+Both sides can send. Off this right goes to tachi; off tachi’s left comes here. While the pointer is on the other computer, that computer’s mouse is captured. Slide back to the facing edge, or Control+Shift+Alt+Super (on a Mac: Control+Shift+Option+Command). **Release pointer** in the panel (or `u`) drops a stuck capture on this machine.
+
+On a Mac, Lan Mouse has to run in the logged-in desktop session. A daemon started over SSH uses a dummy backend and never moves the cursor. Re-pair opens the app in that session, then writes the pairing file again because the window can blank fingerprints. If the pointer leaves this screen and the other computer is down, toggle OmaMouse off in the bar to get the cursor back.
 
 **Windows.** Always manual. Copy steps and run the zip.
 
@@ -45,12 +53,12 @@ UDP `4242` has to reach the peer on Tailscale. If a Mac still cannot connect, ch
 
 ## Clipboard
 
-When the pointer enters a peer, `scripts/clipboard-push` runs. It sends `wl-paste` over `tailscale ssh` to `pbcopy` on macOS or `wl-copy` on Linux. Turn the clipboard row off if you do not want that.
+When the pointer enters a peer, `scripts/clipboard-push` runs. It sends `wl-paste` over SSH to `pbcopy` on macOS or `wl-copy` on Linux. Turn the clipboard row off if you do not want that.
 
-The reverse direction needs a hook on the other computer. If Tailscale SSH is enabled toward this machine:
+The reverse direction needs a hook on the other computer:
 
 ```sh
-pbpaste | tailscale ssh dirk wl-copy
+pbpaste | ssh dirk wl-copy
 ```
 
 ## Keys
@@ -58,12 +66,14 @@ pbpaste | tailscale ssh dirk wl-copy
 | Key | Action |
 |-----|--------|
 | `s` | Start or stop lan-mouse |
+| `u` | Release a stuck pointer on this machine |
 | `c` | Copy this machine's fingerprint |
 | `b` | Toggle clipboard |
 | `x` | Remove the highlighted peer |
 | `r` | Refresh |
 | `i` | Install lan-mouse on the selected peer, or on this computer |
 | `n` | Install on the selected peer |
+| `t` | Retry SSH to the selected peer |
 | `a` | Add or cycle the selected peer's screen edge |
 | Esc | Close |
 
@@ -72,8 +82,8 @@ Right click the bar icon to start or stop. Middle click refreshes.
 ## Remove
 
 ```sh
-omarchy-shell io.github.dicebagstudios.lan-mouse stop
-omarchy plugin remove io.github.dicebagstudios.lan-mouse
+omarchy-shell io.github.avb.omamouse stop
+omarchy plugin remove io.github.avb.omamouse
 ```
 
 `~/.config/lan-mouse/` is left alone so you can reinstall without pairing again.

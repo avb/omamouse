@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import shutil
@@ -129,7 +130,9 @@ def _esc(value: str) -> str:
 
 
 def clipboard_hook(name: str, ip: str, os_name: str) -> str:
-    return f"{paths.PUSH_SCRIPT} {name} {ip} {os_name.replace(' ', '')}"
+    installed = Path.home() / ".config" / "omarchy" / "plugins" / paths.PLUGIN_ID / "scripts" / "clipboard-push"
+    script = installed if installed.is_file() else paths.PUSH_SCRIPT
+    return f"{script} {name} {ip} {os_name.replace(' ', '')}"
 
 
 def write_config(cfg: dict) -> None:
@@ -179,10 +182,31 @@ def build_status() -> dict:
     daemon_pid = pid_alive()
     authorized_by_name = {name: fp for fp, name in cfg["authorized_fingerprints"].items()}
     configured = {c["hostname"]: c for c in cfg["clients"] if c.get("hostname")}
+    try:
+        from .ssh import load_users
+
+        ssh_users = load_users()
+    except Exception:
+        ssh_users = {}
+    try:
+        from .health import load_peer_health, local_health
+
+        peer_health = load_peer_health()
+        local = local_health()
+    except Exception:
+        peer_health = {}
+        local = {
+            "emulationBackend": "",
+            "captureBackend": "",
+            "emulationDummy": False,
+            "captureStuck": False,
+            "lastConnectError": "",
+        }
     machines = []
     for peer in ts["peers"]:
         name = peer["name"]
         client = configured.get(name) or {}
+        h = peer_health.get(name) or {}
         machines.append(
             {
                 "name": name,
@@ -196,6 +220,11 @@ def build_status() -> dict:
                 "active": False,
                 "authorized": name in authorized_by_name,
                 "fingerprint": authorized_by_name.get(name, ""),
+                "sshUser": ssh_users.get(name, ""),
+                "remoteRunning": bool(h.get("remoteRunning")),
+                "remoteUdp": bool(h.get("remoteUdp")),
+                "remotePaired": bool(h.get("remotePaired")),
+                "healthError": h.get("error") or "",
             }
         )
     last = {}
@@ -218,6 +247,7 @@ def build_status() -> dict:
         "clipboardEnabled": clipboard_on(),
         "fingerprint": fingerprint(),
         "port": int(cfg["port"]),
+        "osUser": getpass.getuser(),
         "tailscale": {
             "installed": ts["installed"],
             "running": ts["running"],
@@ -228,7 +258,62 @@ def build_status() -> dict:
         "machines": machines,
         "authorized": [{"fingerprint": fp, "name": name} for fp, name in cfg["authorized_fingerprints"].items()],
         "lastInstall": last,
+        "emulationBackend": local.get("emulationBackend") or "",
+        "captureBackend": local.get("captureBackend") or "",
+        "emulationDummy": bool(local.get("emulationDummy")),
+        "captureStuck": bool(local.get("captureStuck")),
+        "lastConnectError": local.get("lastConnectError") or "",
     }
+
+
+def _graphical_env() -> dict[str, str]:
+    """Run lan-mouse in the compositor session so emulation is not dummy."""
+    env = os.environ.copy()
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    env.setdefault("XDG_RUNTIME_DIR", str(runtime))
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime}/bus")
+    for sock in ("wayland-1", "wayland-0"):
+        if (runtime / sock).exists() or (runtime / f"{sock}.lock").exists():
+            env.setdefault("WAYLAND_DISPLAY", sock)
+            break
+    hypr_root = runtime / "hypr"
+    if hypr_root.is_dir():
+        for child in hypr_root.iterdir():
+            if child.is_dir() and not child.name.endswith(".lock"):
+                env.setdefault("HYPRLAND_INSTANCE_SIGNATURE", child.name)
+                break
+    for proc_dir in Path("/proc").iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        try:
+            cmd = (proc_dir / "comm").read_text().strip()
+        except OSError:
+            continue
+        if cmd != "Hyprland":
+            continue
+        try:
+            raw = (proc_dir / "environ").read_bytes()
+        except OSError:
+            break
+        for item in raw.split(b"\0"):
+            if b"=" not in item:
+                continue
+            key, val = item.split(b"=", 1)
+            name = key.decode("utf-8", "replace")
+            if name in (
+                "WAYLAND_DISPLAY",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_CURRENT_DESKTOP",
+                "XDG_SESSION_TYPE",
+                "XDG_BACKEND",
+            ):
+                env[name] = val.decode("utf-8", "replace")
+        break
+    env.setdefault("XDG_SESSION_TYPE", "wayland")
+    env.setdefault("XDG_CURRENT_DESKTOP", "Hyprland")
+    return env
 
 
 def start_daemon() -> dict:
@@ -244,11 +329,12 @@ def start_daemon() -> dict:
         return build_status()
     log = paths.LOG_PATH.open("ab")
     proc = subprocess.Popen(
-        ["lan-mouse", "daemon"],
+        ["lan-mouse", "--emulation-backend", "wlroots", "--capture-backend", "input-capture-portal", "daemon"],
         stdout=log,
         stderr=subprocess.STDOUT,
         start_new_session=True,
         cwd=str(Path.home()),
+        env=_graphical_env(),
     )
     paths.PID_PATH.write_text(str(proc.pid) + "\n")
     set_desired("on")
@@ -256,6 +342,17 @@ def start_daemon() -> dict:
         if fingerprint():
             break
         time.sleep(0.1)
+    return build_status()
+
+
+def release_pointer() -> dict:
+    """Drop capture and start again so a stuck pointer returns here."""
+    was_on = pid_alive() is not None or desired_on()
+    if pid_alive():
+        stop_daemon(forget_desired=False)
+        time.sleep(0.2)
+    if was_on:
+        return start_daemon()
     return build_status()
 
 
@@ -289,7 +386,11 @@ def add_peer(name: str, position: str) -> dict:
     if not peer["ips"]:
         return {"ok": False, "error": f"{name} has no Tailscale IPv4 address"}
     cfg = load_config()
-    others = [c for c in cfg["clients"] if c.get("hostname") != name]
+    others = [
+        c
+        for c in cfg["clients"]
+        if c.get("hostname") != name and c.get("position") != position
+    ]
     hook = clipboard_hook(name, peer["ips"][0], peer["os"]) if clipboard_on() else ""
     others.append(
         {
@@ -350,6 +451,63 @@ def set_clipboard(enabled: bool) -> dict:
     return build_status()
 
 
+def probe_peers() -> dict:
+    from .health import probe_configured
+
+    cfg = load_config()
+    names = [c.get("hostname") or "" for c in cfg.get("clients") or []]
+    probe_configured(names, fingerprint())
+    return build_status()
+
+
+def restart_peer(name: str) -> dict:
+    from .health import restart_remote, probe_peer, load_peer_health, save_peer_health
+
+    result = restart_remote(name)
+    health = load_peer_health()
+    health[name] = probe_peer(name, fingerprint())
+    save_peer_health(health)
+    payload = build_status()
+    if not result.get("ok"):
+        payload["ok"] = False
+        payload["error"] = result.get("error") or "could not restart lan-mouse there"
+    return payload
+
+
+def forget_peer(name: str) -> dict:
+    from .health import restart_remote
+    from .ssh import Session
+
+    cfg = load_config()
+    fps = [fp for fp, n in cfg["authorized_fingerprints"].items() if n == name]
+    for fp in fps:
+        cfg["authorized_fingerprints"].pop(fp, None)
+    cfg["clients"] = [c for c in cfg["clients"] if c.get("hostname") != name]
+    write_config(cfg)
+    restart_if_running()
+    peer = tailscale.find_peer(name)
+    if peer and peer.get("online"):
+        sess = Session(name, peer)
+        sess.run_script(
+            """
+mkdir -p "$HOME/.config/lan-mouse"
+cat > "$HOME/.config/lan-mouse/config.toml" <<'EOF'
+port = 4242
+release_bind = ["KeyLeftCtrl", "KeyLeftShift", "KeyLeftMeta", "KeyLeftAlt"]
+EOF
+echo forgotten
+""",
+            timeout=12,
+        )
+        restart_remote(name)
+    from .health import load_peer_health, save_peer_health
+
+    health = load_peer_health()
+    health.pop(name, None)
+    save_peer_health(health)
+    return build_status()
+
+
 def copy_fingerprint() -> dict:
     fp = fingerprint()
     if not fp:
@@ -366,10 +524,59 @@ def install_packages() -> dict:
     return build_status()
 
 
-def install_peer(name: str) -> dict:
+def _read_password(use_stdin: bool) -> str:
+    if not use_stdin:
+        return ""
+    return sys.stdin.readline().rstrip("\n\r")
+
+
+def _activate_installed(name: str, user: str, password: str, result: dict) -> dict:
+    if not result.get("installed"):
+        return result
+    if package_version() is None:
+        return result
+    if not pid_alive():
+        start_daemon()
+    fp = fingerprint()
+    from .remote import pair_peer, save_last
+
+    if not fp:
+        result["paired"] = False
+        result["log"] = ((result.get("log") or "") + "\nStart lan-mouse on this computer first so we have a fingerprint.").strip()
+        save_last(result)
+        return result
+    ts = tailscale.status()
+    cfg = load_config()
+    pos = next((c.get("position") or "right" for c in cfg["clients"] if c.get("hostname") == name), "right")
+    peer = tailscale.find_peer(name)
+    pair = pair_peer(
+        name,
+        peer,
+        user=user,
+        password=password,
+        local_fp=fp,
+        local_name=ts["selfName"],
+        local_ip=ts["selfIp"],
+        local_position=pos,
+    )
+    log_bits = [result.get("log") or "", pair.get("log") or ""]
+    result.update(pair)
+    result["log"] = "\n".join(bit for bit in log_bits if bit).strip()
+    result["installed"] = True
+    if pair.get("remoteFingerprint"):
+        authorize(name, pair["remoteFingerprint"])
+    configured = any(c.get("hostname") == name for c in load_config()["clients"])
+    if not configured:
+        add_peer(name, "right")
+    save_last(result)
+    return result
+
+
+def install_peer(name: str, user: str = "", password: str = "") -> dict:
     from .remote import install_peer as do_install
 
-    result = do_install(name)
+    result = do_install(name, user=user, password=password)
+    result = _activate_installed(name, user, password, result)
     payload = build_status()
     payload["lastInstall"] = result
     if result.get("error"):
@@ -377,6 +584,43 @@ def install_peer(name: str) -> dict:
         payload["error"] = result["error"]
     elif not result.get("installed") and result.get("method") == "manual":
         payload["ok"] = True
+    return payload
+
+
+def retry_ssh(name: str, user: str = "", password: str = "") -> dict:
+    from .remote import retry_ssh as do_retry
+
+    result = do_retry(name, user=user, password=password)
+    result = _activate_installed(name, user, password, result)
+    payload = build_status()
+    payload["lastInstall"] = result
+    if result.get("error"):
+        payload["ok"] = False
+        payload["error"] = result["error"]
+    return payload
+
+
+def place_peer(name: str, position: str, user: str = "", password: str = "") -> dict:
+    placed = add_peer(name, position)
+    if placed.get("ok") is False:
+        return placed
+    return repair_peer(name, user, password)
+
+
+def repair_peer(name: str, user: str = "", password: str = "") -> dict:
+    result = {
+        "name": name,
+        "installed": True,
+        "ok": True,
+        "method": "repair",
+        "log": "",
+    }
+    result = _activate_installed(name, user, password, result)
+    payload = build_status()
+    payload["lastInstall"] = result
+    if result.get("error"):
+        payload["ok"] = False
+        payload["error"] = result["error"]
     return payload
 
 
@@ -407,18 +651,29 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--position", default="right")
     parser.add_argument("--fingerprint", default="")
     parser.add_argument("--enabled", default="")
+    parser.add_argument("--user", default="")
+    parser.add_argument("--password-stdin", action="store_true")
     args = parser.parse_args(argv)
     verb = args.verb
+    password = _read_password(args.password_stdin)
     if verb == "status":
         payload = build_status()
     elif verb == "start":
         payload = start_daemon()
     elif verb == "stop":
         payload = stop_daemon()
+    elif verb == "release":
+        payload = release_pointer()
     elif verb == "install":
         payload = install_packages()
     elif verb == "install-peer":
-        payload = install_peer(args.name)
+        payload = install_peer(args.name, user=args.user, password=password)
+    elif verb == "retry-ssh":
+        payload = retry_ssh(args.name, user=args.user, password=password)
+    elif verb == "repair-peer":
+        payload = repair_peer(args.name, user=args.user, password=password)
+    elif verb == "place-peer":
+        payload = place_peer(args.name, args.position, user=args.user, password=password)
     elif verb == "copy-instructions":
         payload = copy_instructions(args.name)
     elif verb == "restore":
@@ -438,6 +693,12 @@ def main(argv: list[str] | None = None) -> None:
             payload = set_clipboard(args.enabled == "on")
     elif verb == "copy-fingerprint":
         payload = copy_fingerprint()
+    elif verb == "probe-peers":
+        payload = probe_peers()
+    elif verb == "restart-peer":
+        payload = restart_peer(args.name)
+    elif verb == "forget-peer":
+        payload = forget_peer(args.name)
     else:
         payload = {"ok": False, "error": f"unknown verb {verb}"}
     print(json.dumps(payload, separators=(",", ":")))

@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from deskshare.ssh import Session, load_user
 
 
 def paste() -> bytes:
@@ -17,30 +21,23 @@ def paste() -> bytes:
     return proc.stdout[: 256 * 1024]
 
 
-def ssh_copy(host: str, os_name: str, data: bytes) -> bool:
-    remote = "pbcopy" if os_name.lower().startswith("mac") or os_name.lower() == "darwin" else "wl-copy"
-    try:
-        proc = subprocess.run(
-            ["tailscale", "ssh", host, remote],
-            check=False,
-            input=data,
-            capture_output=True,
-            timeout=6,
-        )
-        return proc.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+def ssh_copy(host: str, os_name: str, data: bytes, ip: str = "") -> bool:
+    remote = ["pbcopy"] if os_name.lower().startswith("mac") or os_name.lower() == "darwin" else ["wl-copy"]
+    peer = {"name": host, "ips": [ip] if ip else []}
+    proc = Session(host, peer, user=load_user(host)).run(remote, timeout=6, input=data)
+    return proc.returncode == 0
 
 
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(0)
     host = sys.argv[1]
+    ip = sys.argv[2] if len(sys.argv) > 2 else ""
     os_name = sys.argv[3] if len(sys.argv) > 3 else "linux"
     data = paste()
     if not data:
         raise SystemExit(0)
-    ssh_copy(host, os_name, data)
+    ssh_copy(host, os_name, data, ip)
 
 
 if __name__ == "__main__":

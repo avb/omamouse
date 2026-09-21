@@ -1,12 +1,15 @@
 #!/bin/bash
 # Copy this checkout into ~/.config/omarchy/plugins and reload the shell.
 set -euo pipefail
-ID=io.github.dicebagstudios.lan-mouse
+ID=io.github.avb.omamouse
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 DEST="$HOME/.config/omarchy/plugins/$ID"
 omarchy plugin validate "$HERE"
 mkdir -p "$(dirname "$DEST")"
-rm -rf "$DEST"
+rm -rf "$DEST" \
+  "$HOME/.config/omarchy/plugins/io.github.dicebagstudios.omamouse" \
+  "$HOME/.config/omarchy/plugins/io.github.dicebagstudios.omamice" \
+  "$HOME/.config/omarchy/plugins/io.github.dicebagstudios.lan-mouse"
 mkdir -p "$DEST"
 # cp without -a so mtimes move and the shell watcher notices.
 cp -R "$HERE"/. "$DEST"

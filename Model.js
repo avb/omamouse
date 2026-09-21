@@ -14,10 +14,16 @@ function emptyStatus() {
     clipboardEnabled: true,
     fingerprint: "",
     port: 4242,
+    osUser: "",
     tailscale: { installed: false, running: false, selfName: "", selfDns: "", selfIp: "" },
     machines: [],
     authorized: [],
     lastInstall: {},
+    emulationBackend: "",
+    captureBackend: "",
+    emulationDummy: false,
+    captureStuck: false,
+    lastConnectError: "",
     error: ""
   }
 }
@@ -66,4 +72,21 @@ function shortFingerprint(fp) {
   var s = String(fp || "")
   if (s.length < 11) return s
   return s.slice(0, 8) + "…" + s.slice(-5)
+}
+
+function oppositeEdge(position) {
+  var p = String(position || "")
+  if (p === "left") return "right"
+  if (p === "right") return "left"
+  if (p === "top") return "bottom"
+  if (p === "bottom") return "top"
+  return "left"
+}
+
+function machineOnEdge(machines, edge) {
+  var list = machines || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].configured && list[i].position === edge) return list[i]
+  }
+  return null
 }

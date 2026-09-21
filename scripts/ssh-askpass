@@ -1,0 +1,7 @@
+#!/bin/sh
+# OpenSSH ASKPASS helper. Prints the one-shot password file; never logs it.
+file=${DESKSHARE_SSH_PASSFILE:-}
+if [ -n "$file" ] && [ -r "$file" ]; then
+  exec cat "$file"
+fi
+exit 1

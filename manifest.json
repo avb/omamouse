@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.dicebagstudios.lan-mouse",
-  "name": "Lan Mouse",
-  "version": "1.2.0",
-  "author": "Dicebag Studios",
+  "id": "io.github.avb.omamouse",
+  "name": "OmaMouse",
+  "version": "1.6.0",
+  "author": "Adam Brown",
   "license": "MIT",
   "description": "Share one keyboard and mouse across Tailscale machines from the Omarchy bar, using lan-mouse.",
   "kinds": [
@@ -13,7 +13,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Lan Mouse",
+    "displayName": "OmaMouse",
     "description": "Slide the pointer off the edge of this screen onto another Tailscale machine.",
     "category": "Desktop",
     "allowMultiple": false,

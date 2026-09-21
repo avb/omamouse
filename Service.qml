@@ -12,14 +12,16 @@ Item {
   property var status: Model.emptyStatus()
   property string lastError: ""
   property bool busy: statusProcess.running || actionProcess.running
+  property bool probing: probeProcess.running
   property bool restoring: false
+  property string pendingSecret: ""
 
   readonly property string ctlPath: {
     var u = pluginRootUrl.toString()
     if (u.indexOf("file://") === 0) u = u.substring(7)
     if (u.charAt(0) !== "/") {
       var home = Quickshell.env("HOME") || ""
-      u = home + "/.config/omarchy/plugins/io.github.dicebagstudios.lan-mouse/"
+      u = home + "/.config/omarchy/plugins/io.github.avb.omamouse/"
     }
     return u.replace(/\/+$/, "") + "/scripts/ctl"
   }
@@ -44,28 +46,66 @@ Item {
     statusProcess.running = true
   }
 
-  function runVerb(args) {
+  function runVerb(args, secret) {
     if (actionProcess.running) return
     lastError = ""
+    pendingSecret = secret || ""
+    actionProcess.stdinEnabled = pendingSecret !== ""
     actionProcess.command = ["python3", ctlPath].concat(args)
     actionProcess.running = true
   }
 
   function startDaemon() { runVerb(["start"]) }
   function stopDaemon() { runVerb(["stop"]) }
+  function releasePointer() { runVerb(["release"]) }
   function toggleDaemon() {
     if (status.daemonRunning) stopDaemon()
     else startDaemon()
   }
   function installPackages() { runVerb(["install"]) }
   function addPeer(name, position) { runVerb(["add-peer", "--name", name, "--position", position]) }
+  function placePeer(name, position, user, password) {
+    var args = ["place-peer", "--name", name, "--position", position]
+    if (user) args.push("--user", user)
+    if (password) args.push("--password-stdin")
+    runVerb(args, password || "")
+  }
   function removePeer(name) { runVerb(["remove-peer", "--name", name]) }
   function authorize(name, fingerprint) { runVerb(["authorize", "--name", name, "--fingerprint", fingerprint]) }
   function deauthorize(fingerprint) { runVerb(["deauthorize", "--fingerprint", fingerprint]) }
   function setClipboard(on) { runVerb(["clipboard", "--enabled", on ? "on" : "off"]) }
   function copyFingerprint() { runVerb(["copy-fingerprint"]) }
-  function installPeer(name) { runVerb(["install-peer", "--name", name]) }
+  function installPeer(name, user, password) {
+    var args = ["install-peer", "--name", name]
+    if (user) args.push("--user", user)
+    if (password) args.push("--password-stdin")
+    runVerb(args, password || "")
+  }
+  function retrySsh(name, user, password) {
+    var args = ["retry-ssh", "--name", name]
+    if (user) args.push("--user", user)
+    if (password) args.push("--password-stdin")
+    runVerb(args, password || "")
+  }
+  function repairPeer(name, user, password) {
+    var args = ["repair-peer", "--name", name]
+    if (user) args.push("--user", user)
+    if (password) args.push("--password-stdin")
+    runVerb(args, password || "")
+  }
   function copyInstructions(name) { runVerb(["copy-instructions", "--name", name]) }
+  function probePeers() {
+    if (probeProcess.running || actionProcess.running) return
+    probeProcess.command = ["python3", ctlPath, "probe-peers"]
+    probeProcess.running = true
+  }
+  function restartPeer(name, user, password) {
+    var args = ["restart-peer", "--name", name]
+    if (user) args.push("--user", user)
+    if (password) args.push("--password-stdin")
+    runVerb(args, password || "")
+  }
+  function forgetPeer(name) { runVerb(["forget-peer", "--name", name]) }
   function restore() {
     if (!restoreDaemon || restoring) return
     restoring = true
@@ -82,12 +122,19 @@ Item {
 
   Process {
     id: actionProcess
+    stdinEnabled: false
     stdout: StdioCollector {
       onStreamFinished: root.applyPayload(text)
     }
     stderr: StdioCollector {
       onStreamFinished: {
         if (text && text.trim() !== "") root.lastError = text.trim().split("\n").slice(-1)[0]
+      }
+    }
+    onStarted: {
+      if (root.pendingSecret !== "") {
+        write(root.pendingSecret + "\n")
+        root.pendingSecret = ""
       }
     }
     onExited: {
@@ -98,6 +145,13 @@ Item {
 
   function refreshingDone() {}
 
+  Process {
+    id: probeProcess
+    stdout: StdioCollector {
+      onStreamFinished: root.applyPayload(text)
+    }
+  }
+
   Timer {
     interval: root.refreshIntervalSec * 1000
     running: true
@@ -105,8 +159,23 @@ Item {
     onTriggered: root.refresh()
   }
 
+  Timer {
+    interval: 30000
+    running: true
+    repeat: true
+    onTriggered: {
+      var machines = root.status.machines || []
+      var any = false
+      for (var i = 0; i < machines.length; i++) {
+        if (machines[i].configured && machines[i].online) any = true
+      }
+      if (any) root.probePeers()
+    }
+  }
+
   Component.onCompleted: {
     refresh()
     Qt.callLater(root.restore)
+    Qt.callLater(root.probePeers)
   }
 }
